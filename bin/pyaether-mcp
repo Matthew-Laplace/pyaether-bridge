@@ -1,0 +1,24 @@
+#!/usr/bin/env python3
+"""pyaether MCP stdio server launcher shim: calls pyaether_bridge.mcp_server.main()."""
+
+import os
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+try:
+    from pyaether_bridge import mcp_server
+except ImportError as exc:
+    sys.stderr.write("pyaether-mcp: cannot import pyaether_bridge.mcp_server (%s)\n" % exc)
+    sys.stderr.write("repository root: %s\n" % ROOT)
+    raise SystemExit(1)
+
+main = getattr(mcp_server, "main", None)
+if main is None:
+    sys.stderr.write("pyaether-mcp: pyaether_bridge.mcp_server has no main(), cannot start.\n")
+    raise SystemExit(1)
+
+if __name__ == "__main__":
+    raise SystemExit(main())

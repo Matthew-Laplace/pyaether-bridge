@@ -1,0 +1,25 @@
+# 本地构建产物：由你安装的 Aether 文档生成，含厂商文档文本，切勿提交或分发
+/data/
+# 兜底：任何位置生成的目录数据库都不要入库（含厂商文档文本）
+*.sqlite
+*.sqlite3
+
+# 运行痕迹
+*.sock
+*.pid
+*.log
+daemon.lock
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
+.history/

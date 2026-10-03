@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+"""pyaether CLI launcher shim: put the repository root on sys.path, then call
+pyaether_bridge.cli.main()."""
+
+import os
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+try:
+    from pyaether_bridge import cli
+except ImportError as exc:  # give a clear hint when the checkout is incomplete
+    sys.stderr.write("pyaether: cannot import pyaether_bridge.cli (%s)\n" % exc)
+    sys.stderr.write("repository root: %s\n" % ROOT)
+    raise SystemExit(1)
+
+if __name__ == "__main__":
+    raise SystemExit(cli.main())
