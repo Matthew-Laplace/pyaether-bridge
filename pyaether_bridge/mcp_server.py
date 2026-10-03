@@ -191,6 +191,151 @@ TOOLS = [
             ("netlist",),
         ),
     },
+    {
+        "name": "pyaether_layout_gen",
+        "description": "Build a GDS2/OASIS layout with KLayout from a JSON spec "
+                        "(cells, boxes, polygons, paths, texts, instance arrays). "
+                        "Returns the written path, shape counts and extents.",
+        "inputSchema": _object_schema(
+            {
+                "spec": {
+                    "type": "object",
+                    "description": "Layout spec: {top, dbu, layers: {name: [layer, "
+                                   "datatype]}, cells: {name: {shapes: [...], "
+                                   "instances: [...]}}}. Lengths are microns unless "
+                                   "the spec sets unit.",
+                },
+                "output": {
+                    "type": "string",
+                    "description": "Output path; .gds or .oas decides the format. "
+                                   "Defaults to a file in the working directory.",
+                },
+                "timeout": {
+                    "type": "number", "minimum": 1, "maximum": 86400, "default": 600,
+                    "description": "Timeout in seconds, default 600.",
+                },
+            },
+            ("spec",),
+        ),
+    },
+    {
+        "name": "pyaether_layout_info",
+        "description": "Read a layout file with KLayout: top cells, every cell's "
+                        "shape counts per layer, instance counts and bounding box.",
+        "inputSchema": _object_schema(
+            {
+                "path": {"type": "string", "description": "Layout file to read."},
+                "layers": {
+                    "type": "object",
+                    "description": "Optional layer name map {name: [layer, datatype]}. "
+                                   "GDS2 stores no layer names; OASIS does.",
+                },
+                "timeout": {"type": "number", "minimum": 1, "maximum": 86400,
+                            "default": 600},
+            },
+            ("path",),
+        ),
+    },
+    {
+        "name": "pyaether_layout_drc",
+        "description": "Run design-rule checks with KLayout and report violations "
+                        "per rule. A rule that cannot be evaluated is an error, "
+                        "never a silent pass.",
+        "inputSchema": _object_schema(
+            {
+                "path": {"type": "string", "description": "Layout file to check."},
+                "rules": {
+                    "type": "array",
+                    "description": "Rules: [{name, check: width|space|notch|"
+                                   "enclosing|area, layer, other?, value}] with "
+                                   "value in microns.",
+                    "items": {"type": "object"},
+                },
+                "layers": {
+                    "type": "object",
+                    "description": "Optional layer name map {name: [layer, datatype]}.",
+                },
+                "timeout": {"type": "number", "minimum": 1, "maximum": 86400,
+                            "default": 600},
+            },
+            ("path", "rules"),
+        ),
+    },
+    {
+        "name": "pyaether_layout_boolean",
+        "description": "Layer algebra with KLayout (merge/and/not/xor/size) into a "
+                        "new layer or a new file.",
+        "inputSchema": _object_schema(
+            {
+                "op": {"type": "string",
+                       "enum": ["merge", "and", "not", "xor", "size", "grow", "shrink"]},
+                "a": {"type": "string", "description": "First layer: name or "
+                                                       "\"layer/datatype\"."},
+                "b": {"type": "string", "description": "Second layer for and/not/xor."},
+                "value": {"type": "number", "description": "Size in microns for size/grow/shrink."},
+                "out_layer": {"type": "string", "description": "Layer for the result."},
+                "source": {"type": "string", "description": "Input layout file."},
+                "output": {"type": "string", "description": "Output layout file."},
+                "layers": {"type": "object", "description": "Optional layer name map."},
+                "timeout": {"type": "number", "minimum": 1, "maximum": 86400,
+                            "default": 600},
+            },
+            ("op", "a", "out_layer"),
+        ),
+    },
+    {
+        "name": "pyaether_layout_convert",
+        "description": "Convert or clip a layout with KLayout's standalone stream "
+                        "tools (strm2oas, strm2gds, strm2cif, strmclip, ...). "
+                        "The output suffix picks the format unless tool is given.",
+        "inputSchema": _object_schema(
+            {
+                "source": {"type": "string", "description": "Input layout file."},
+                "output": {"type": "string", "description": "Output layout file."},
+                "tool": {"type": "string",
+                         "description": "Tool key: oasis/gds/cif/dxf/txt/mag/lstr/clip."},
+                "timeout": {"type": "number", "minimum": 1, "maximum": 86400,
+                            "default": 600},
+            },
+            ("source", "output"),
+        ),
+    },
+    {
+        "name": "pyaether_layout_compare",
+        "description": "Compare two layouts (strmcmp) or XOR them (strmxor). "
+                        "Answer is data.identical / data.returncode: 0 means the "
+                        "geometries match, non-zero means they differ.",
+        "inputSchema": _object_schema(
+            {
+                "a": {"type": "string", "description": "First layout file."},
+                "b": {"type": "string", "description": "Second layout file."},
+                "tool": {"type": "string", "enum": ["compare", "xor"], "default": "compare"},
+                "timeout": {"type": "number", "minimum": 1, "maximum": 86400,
+                            "default": 600},
+            },
+            ("a", "b"),
+        ),
+    },
+    {
+        "name": "pyaether_layout_deck",
+        "description": "Run a KLayout rule deck (.drc / .lvs) through the real "
+                        "engine. Returns the deck's exit code, log and any report "
+                        "database. A deck that runs but writes no report is "
+                        "reported as PARTIAL, never as 'design rule clean'.",
+        "inputSchema": _object_schema(
+            {
+                "script": {"type": "string", "description": "Rule deck (.drc or .lvs)."},
+                "source": {"type": "string",
+                           "description": "Layout passed to the deck as $source."},
+                "top": {"type": "string", "description": "Top cell name for the deck."},
+                "define": {"type": "array", "items": {"type": "string"},
+                           "description": "Extra NAME=VALUE variables for -rd."},
+                "timeout": {"type": "number", "minimum": 1, "maximum": 86400,
+                            "default": 600},
+            },
+            ("script",),
+        ),
+    },
 ]
 
 TOOL_NAMES = tuple(tool["name"] for tool in TOOLS)
@@ -395,6 +540,192 @@ def _format_sim(result):
     return "\n".join(lines)
 
 
+def _format_layout(result):
+    """Render a layout operation: status first, then the numbers that matter."""
+    operation = result.get("operation") or "?"
+    lines = ["status: %s (ok=%s)" % (result.get("status"), result.get("ok")),
+             "operation: %s" % operation]
+    metadata = result.get("metadata") or {}
+    for key in ("engine", "target", "artifact"):
+        if metadata.get(key):
+            lines.append("%s: %s" % (key, metadata[key]))
+    data = result.get("data") or {}
+    if operation == "gen":
+        lines.append("top: %s" % data.get("top"))
+        lines.append("counts: %s" % json.dumps(data.get("counts"), ensure_ascii=False))
+        if data.get("bbox_um"):
+            lines.append("bbox_um: %s" % data["bbox_um"])
+        lines.append("layers: %s" % ", ".join(data.get("layers") or []))
+    elif operation == "info":
+        lines.append("top_cells: %s" % ", ".join(data.get("top_cells") or []))
+        for cell in data.get("cells") or []:
+            lines.append("cell %s: shapes=%s instances=%s %s"
+                         % (cell.get("name"), cell.get("shapes"), cell.get("instances"),
+                            json.dumps(cell.get("shapes_by_layer"), ensure_ascii=False)))
+    elif operation == "drc":
+        lines.append("clean: %s" % data.get("clean"))
+        lines.append("violations: %s" % data.get("violations"))
+        for rule in data.get("rules") or []:
+            text = "rule %s [%s]: %s" % (rule.get("name"), rule.get("check"),
+                                         rule.get("violations"))
+            if rule.get("error"):
+                text += " ERROR: %s" % rule["error"][:200]
+            lines.append(text)
+            for marker in (rule.get("markers") or [])[:5]:
+                lines.append("  at %s" % marker.get("bbox_um"))
+    elif operation == "boolean":
+        lines.append("op: %s" % data.get("op"))
+        lines.append("polygons: %s" % data.get("polygons"))
+        if data.get("bbox_um"):
+            lines.append("bbox_um: %s" % data["bbox_um"])
+    for error in result.get("errors") or []:
+        lines.append("error: %s" % error)
+    for warning in (result.get("warnings") or [])[:5]:
+        lines.append("warning: %s" % warning)
+    return "\n".join(lines)
+
+
+def _tool_layout_gen(arguments):
+    spec = arguments.get("spec")
+    if not isinstance(spec, dict) or not spec:
+        raise _BadArgument("argument spec must be a non-empty object")
+    output = arguments.get("output")
+    if output is not None and not isinstance(output, str):
+        raise _BadArgument("argument output must be a string")
+    timeout = _clamp_number(arguments.get("timeout", 600), "timeout", 1, 86400, False)
+    layout = _load("layout")
+    try:
+        result = layout.generate(spec, output, timeout=timeout)
+    except layout.LayoutError as exc:
+        return "layout generation could not start: %s" % exc, True
+    return _format_layout(result), not bool(result.get("ok"))
+
+
+def _tool_layout_info(arguments):
+    path = arguments.get("path")
+    if not isinstance(path, str) or not path.strip():
+        raise _BadArgument("argument path must be a non-empty string")
+    layers = arguments.get("layers")
+    if layers is not None and not isinstance(layers, dict):
+        raise _BadArgument("argument layers must be an object")
+    timeout = _clamp_number(arguments.get("timeout", 600), "timeout", 1, 86400, False)
+    layout = _load("layout")
+    try:
+        result = layout.info(path, layers=layers, timeout=timeout)
+    except layout.LayoutError as exc:
+        return "layout info could not start: %s" % exc, True
+    return _format_layout(result), not bool(result.get("ok"))
+
+
+def _tool_layout_drc(arguments):
+    path = arguments.get("path")
+    if not isinstance(path, str) or not path.strip():
+        raise _BadArgument("argument path must be a non-empty string")
+    rules = arguments.get("rules")
+    if not isinstance(rules, list) or not rules:
+        raise _BadArgument("argument rules must be a non-empty array")
+    layers = arguments.get("layers")
+    if layers is not None and not isinstance(layers, dict):
+        raise _BadArgument("argument layers must be an object")
+    timeout = _clamp_number(arguments.get("timeout", 600), "timeout", 1, 86400, False)
+    layout = _load("layout")
+    try:
+        result = layout.drc(path, rules, layers=layers, timeout=timeout)
+    except layout.LayoutError as exc:
+        return "layout drc could not start: %s" % exc, True
+    # Note for callers: a clean run and a run with violations both execute
+    # successfully; `clean` in the text says which one happened.
+    return _format_layout(result), not bool(result.get("ok"))
+
+
+def _tool_layout_boolean(arguments):
+    op = arguments.get("op")
+    if not isinstance(op, str):
+        raise _BadArgument("argument op must be a string")
+    a = arguments.get("a")
+    if not isinstance(a, (str, list)):
+        raise _BadArgument("argument a must be a layer name or [layer, datatype]")
+    out_layer = arguments.get("out_layer")
+    if not isinstance(out_layer, (str, list)):
+        raise _BadArgument("argument out_layer must be a layer name or [layer, datatype]")
+    timeout = _clamp_number(arguments.get("timeout", 600), "timeout", 1, 86400, False)
+    layers = arguments.get("layers")
+    if layers is not None and not isinstance(layers, dict):
+        raise _BadArgument("argument layers must be an object")
+    layout = _load("layout")
+    try:
+        result = layout.boolean(op, a, b=arguments.get("b"), out_layer=out_layer,
+                                output=arguments.get("output"),
+                                source=arguments.get("source"),
+                                value=arguments.get("value"), layers=layers,
+                                timeout=timeout)
+    except layout.LayoutError as exc:
+        return "layout boolean could not start: %s" % exc, True
+    return _format_layout(result), not bool(result.get("ok"))
+
+
+def _tool_layout_convert(arguments):
+    source = arguments.get("source")
+    output = arguments.get("output")
+    for name, value in (("source", source), ("output", output)):
+        if not isinstance(value, str) or not value.strip():
+            raise _BadArgument("argument %s must be a non-empty string" % name)
+    tool = arguments.get("tool")
+    if tool is not None and not isinstance(tool, str):
+        raise _BadArgument("argument tool must be a string")
+    timeout = _clamp_number(arguments.get("timeout", 600), "timeout", 1, 86400, False)
+    layout = _load("layout")
+    try:
+        result = layout.convert(source, output, tool=tool, timeout=timeout)
+    except layout.LayoutError as exc:
+        return "layout convert could not start: %s" % exc, True
+    return _format_layout(result), not bool(result.get("ok"))
+
+
+def _tool_layout_compare(arguments):
+    a = arguments.get("a")
+    b = arguments.get("b")
+    for name, value in (("a", a), ("b", b)):
+        if not isinstance(value, str) or not value.strip():
+            raise _BadArgument("argument %s must be a non-empty string" % name)
+    tool = arguments.get("tool", "compare")
+    if tool not in ("compare", "xor"):
+        raise _BadArgument("argument tool must be 'compare' or 'xor'")
+    timeout = _clamp_number(arguments.get("timeout", 600), "timeout", 1, 86400, False)
+    layout = _load("layout")
+    try:
+        result = layout.compare(a, b, tool=tool, timeout=timeout)
+    except layout.LayoutError as exc:
+        return "layout compare could not start: %s" % exc, True
+    # Not an error when the layouts differ: the answer is in data.identical.
+    text = _format_layout(result) + "\nidentical: %s (exit code %s, 0 = identical)" % (
+        (result.get("data") or {}).get("identical"),
+        (result.get("data") or {}).get("returncode"))
+    return text, not bool(result.get("ok"))
+
+
+def _tool_layout_deck(arguments):
+    script = arguments.get("script")
+    if not isinstance(script, str) or not script.strip():
+        raise _BadArgument("argument script must be a non-empty string")
+    source = arguments.get("source")
+    top = arguments.get("top")
+    for name, value in (("source", source), ("top", top)):
+        if value is not None and not isinstance(value, str):
+            raise _BadArgument("argument %s must be a string" % name)
+    define = arguments.get("define")
+    if define is not None and not isinstance(define, list):
+        raise _BadArgument("argument define must be an array of NAME=VALUE strings")
+    timeout = _clamp_number(arguments.get("timeout", 600), "timeout", 1, 86400, False)
+    layout = _load("layout")
+    try:
+        result = layout.deck(script, source=source, top=top, timeout=timeout,
+                             extra_args=define)
+    except layout.LayoutError as exc:
+        return "layout deck could not start: %s" % exc, True
+    return _format_layout(result), not bool(result.get("ok"))
+
+
 _TOOL_HANDLERS.update(
     {
         "pyaether_status": _tool_status,
@@ -402,6 +733,13 @@ _TOOL_HANDLERS.update(
         "pyaether_api_help": _tool_api_help,
         "pyaether_exec": _tool_exec,
         "pyaether_sim_run": _tool_sim_run,
+        "pyaether_layout_gen": _tool_layout_gen,
+        "pyaether_layout_info": _tool_layout_info,
+        "pyaether_layout_drc": _tool_layout_drc,
+        "pyaether_layout_boolean": _tool_layout_boolean,
+        "pyaether_layout_convert": _tool_layout_convert,
+        "pyaether_layout_compare": _tool_layout_compare,
+        "pyaether_layout_deck": _tool_layout_deck,
     }
 )
 

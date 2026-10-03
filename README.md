@@ -135,8 +135,53 @@ echo 'import pyAether; print(pyAether.__file__)' | ./bin/pyaether exec
 ./bin/pyaether sim backends --probe            # which simulators are available
 ./bin/pyaether sim run rc.cir --backend ngspice  # open-source SPICE
 ./bin/pyaether sim run tb.scs --backend spectre --mode ax
+
+./bin/pyaether layout gen spec.json -o out.gds    # KLayout: build a layout
+./bin/pyaether layout drc out.gds --rules rules.json --layers '{"m1":[1,0]}'
+./bin/pyaether layout compare a.gds b.gds         # exit 0 = identical
+
+./bin/pyaether dsh install --profile web          # DeepSeek Harness plugin
 ./bin/pyaether version
 ```
+
+## Layout (KLayout)
+
+Layouts are generated, read, checked and converted with **KLayout**, driven the
+way its authors support headless use: `klayout -b -r <script>` (`-b` is
+`-zz -nc -rx`, so no GUI, no configuration file, no implicit macros). No Python
+package is installed -- the script runs inside KLayout's own interpreter -- and
+KLayout is invoked as a separate process, never imported.
+
+```bash
+./bin/pyaether layout probe                        # available? which version?
+./bin/pyaether layout gen spec.json -o out.gds     # boxes, polygons, paths, texts, arrays
+./bin/pyaether layout info out.gds --layers '{"m1":[1,0]}'
+./bin/pyaether layout drc out.gds --rules rules.json --layers '{"m1":[1,0]}'
+./bin/pyaether layout boolean and --a 1/0 --b 2/0 --out-layer 4/0 --source out.gds -o and.gds
+./bin/pyaether layout convert out.gds out.oas      # KLayout's own stream tools
+./bin/pyaether layout compare a.gds b.gds          # exit 0 = identical
+./bin/pyaether layout deck rules.drc --source out.gds
+```
+
+Three behaviours are deliberate: a DRC run with violations exits `3` (a dirty
+layout must not pass CI), touching edges from merged geometry are not counted as
+spacing errors, and a rule that cannot be evaluated fails the run instead of
+reporting zero violations. See [docs/LAYOUT.md](docs/LAYOUT.md).
+
+## DeepSeek Harness
+
+The bridge is an MCP server, and DeepSeek Harness ships an MCP client plugin, so
+it installs as a DSH plugin with one command:
+
+```bash
+./bin/pyaether dsh install --profile web   # patch entry + skill, with a backup
+./bin/pyaether dsh verify --profile web    # prove the harness composes it
+```
+
+The install raises the MCP client's per-call timeout (its 60 s default is too
+short for simulations and layout jobs), uses the `- insert:` form the harness
+requires, and rolls the edit back if the harness rejects the result. See
+[docs/DEEPSEEK-HARNESS.md](docs/DEEPSEEK-HARNESS.md).
 
 ## Simulators
 
@@ -297,6 +342,11 @@ prefers the documented entry with the full typed signature.
 | `PYAETHER_ALPS_BIN` | Empyrean ALPS binary (default `alps`; needs your own valid licence) |
 | `PYAETHER_ALPS_THREADS` | Threads passed to ALPS as `-mt` (optional) |
 | `PYAETHER_PROFILE` | Active profile for this command (overrides the binding file) |
+| `PYAETHER_KLAYOUT_BIN` | KLayout executable (default `klayout`) |
+| `PYAETHER_KLAYOUT_TARGET` | Where KLayout runs: `docker` / `ssh` / `local` (default: this machine when KLayout is installed here) |
+| `PYAETHER_KLAYOUT_BUDDY_DIR` | Directory holding KLayout's stream tools (default: inferred from the KLayout binary) |
+| `PYAETHER_LAYOUT_WORKDIR` | Layout run directory root on the target (default `/tmp/pyaether-layout`) |
+| `PYAETHER_LAYOUT_TIMEOUT` | Default layout timeout in seconds (default 600) |
 
 Machine-specific settings can also live in
 `$PYAETHER_BRIDGE_HOME/config.json` (default
@@ -371,6 +421,8 @@ python3 tests/transport_probe.py         # transport layer: local + fake-ssh stu
 PYAETHER_TEST_DOCKER=1 python3 tests/transport_probe.py   # also exercise a real container
 python3 tests/simulator_probe.py         # real ngspice run + result contract
 python3 tests/profile_probe.py           # profile resolution and daemon isolation
+python3 tests/layout_probe.py            # real KLayout runs against known geometry
+python3 tests/dsh_probe.py               # DeepSeek Harness install/compose cycle
 PYAETHER_ALPS_PROBE=1 python3 tests/alps_live_probe.py    # vendor simulator, needs a licence
 ```
 
@@ -378,6 +430,8 @@ PYAETHER_ALPS_PROBE=1 python3 tests/alps_live_probe.py    # vendor simulator, ne
 
 - [docs/INSTALL.md](docs/INSTALL.md) — target preparation, self-checks, troubleshooting
 - [docs/SIMULATORS.md](docs/SIMULATORS.md) — simulator backends, result contract, adding a new one
+- [docs/LAYOUT.md](docs/LAYOUT.md) — KLayout operations, spec and rule formats, licence boundary
+- [docs/DEEPSEEK-HARNESS.md](docs/DEEPSEEK-HARNESS.md) — installing the bridge as a DSH plugin
 - [ARCHITECTURE.md](ARCHITECTURE.md) — module layout, internal interfaces, wire format
 - [README.ja.md](README.ja.md) — 日本語版
 - [README.zh-TW.md](README.zh-TW.md) — 繁體中文版

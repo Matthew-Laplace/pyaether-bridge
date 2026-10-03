@@ -55,6 +55,12 @@ jobs:
       - name: Profile resolution probe
         run: python tests/profile_probe.py
 
+      - name: Layout probe (KLayout is not installed on this runner, so it skips)
+        run: python tests/layout_probe.py
+
+      - name: DeepSeek Harness probe (skips without dsh)
+        run: python tests/dsh_probe.py
+
       - name: Vendor simulator probe (skips without ALPS and a licence)
         run: python tests/alps_live_probe.py
 

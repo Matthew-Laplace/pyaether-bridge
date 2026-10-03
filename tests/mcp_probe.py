@@ -210,6 +210,13 @@ EXPECTED_TOOLS = {
     "pyaether_api_help": ["symbol"],
     "pyaether_exec": ["code"],
     "pyaether_sim_run": ["netlist"],
+    "pyaether_layout_gen": ["spec"],
+    "pyaether_layout_info": ["path"],
+    "pyaether_layout_drc": ["path", "rules"],
+    "pyaether_layout_boolean": ["op", "a", "out_layer"],
+    "pyaether_layout_convert": ["source", "output"],
+    "pyaether_layout_compare": ["a", "b"],
+    "pyaether_layout_deck": ["script"],
 }
 
 

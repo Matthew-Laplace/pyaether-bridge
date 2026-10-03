@@ -75,6 +75,14 @@ def _simulators():
     return _load("simulators")
 
 
+def _layout():
+    return _load("layout")
+
+
+def _dsh():
+    return _load("dsh")
+
+
 # --------------------------------------------------------------------------- #
 # output helpers
 # --------------------------------------------------------------------------- #
@@ -531,6 +539,323 @@ def cmd_profile(args):
 # --------------------------------------------------------------------------- #
 # simulators
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# layout (KLayout)
+# --------------------------------------------------------------------------- #
+def cmd_dsh(args):
+    module = _dsh()
+    action = getattr(args, "dsh_command", None) or "status"
+    profile = getattr(args, "profile", None) or "web"
+    home = getattr(args, "dsh_home", None)
+
+    if action == "patch":
+        body = module.render_patch()
+        if getattr(args, "json", False):
+            _print_json({"profile": profile, "patch": body,
+                         "entry": module.entry()})
+        else:
+            sys.stdout.write(body)
+        return 0
+
+    if action == "install":
+        try:
+            report = module.install(profile, home, dry_run=getattr(args, "dry_run", False))
+        except module.DshError as exc:
+            raise CliError(str(exc),
+                           hint="check `%s dsh status --profile %s` first." % (PROG, profile))
+
+        def human_install():
+            if report["dry_run"]:
+                print("dry run -- the patch that would be written:\n")
+                sys.stdout.write(report.get("patch_preview", ""))
+                return
+            if report["entry_already_present"]:
+                print("MCP entry already present, left unchanged: %s" % report["patch_file"])
+            else:
+                print("wrote MCP entry into %s" % report["patch_file"])
+                if report["backup"]:
+                    print("  backup: %s" % report["backup"])
+            print("installed skill: %s" % report["skill_file"])
+            print("\nnext: restart the harness (or reload the profile), then the tools "
+                  "appear as mcp__%s__*" % module.SERVER_NAME)
+            print("verify: %s dsh verify --profile %s" % (PROG, profile))
+        _emit(report, getattr(args, "json", False), human_install)
+        return 0
+
+    if action == "uninstall":
+        try:
+            report = module.uninstall(profile, home)
+        except module.DshError as exc:
+            raise CliError(str(exc))
+        return _emit(report, getattr(args, "json", False), lambda: (
+            print("entry removed: %s" % report["entry_removed"]),
+            print("skill removed: %s" % report["skill_removed"]),
+            print("backup: %s" % (report["backup"] or "(none)"))))
+
+    if action == "verify":
+        try:
+            report = module.verify(profile, home)
+        except module.DshError as exc:
+            raise CliError(str(exc))
+
+        def human_verify():
+            print("dsh        : %s" % (report.get("dsh_cli") or "(not on PATH)"))
+            print("dsh home   : %s" % report["dsh_home"])
+            print("profile    : %s (exists=%s)" % (report["profile"], report["profile_exists"]))
+            print("patch      : %s (entry installed=%s)"
+                  % (report["patch_file"], report["entry_installed"]))
+            print("skill      : %s (installed=%s)"
+                  % (report["skill_file"], report["skill_installed"]))
+            print("composed   : %s" % ("contains the entry" if report.get("composed_ok")
+                                       else "NOT verified"))
+            if report.get("compose_error"):
+                print("  %s" % report["compose_error"])
+            print("mcp command: %s" % report["mcp_command"])
+        _emit(report, getattr(args, "json", False), human_verify)
+        return 0 if report.get("composed_ok") else 1
+
+    # default: status
+    try:
+        report = module.status(profile, home)
+    except module.DshError as exc:
+        raise CliError(str(exc))
+
+    def human_status():
+        print("dsh CLI    : %s" % (report["dsh_cli"] or "(not on PATH -- install DeepSeek Harness)"))
+        print("dsh home   : %s" % report["dsh_home"])
+        print("profile    : %s%s" % (report["profile"],
+                                     "" if report["profile_exists"] else " (missing)"))
+        print("MCP entry  : %s" % ("installed" if report["entry_installed"] else "not installed"))
+        print("skill      : %s" % ("installed" if report["skill_installed"] else "not installed"))
+        print("server     : %s (timeout %sms)"
+              % (report["mcp_command"], report["tool_timeout_ms"]))
+        if not report["entry_installed"]:
+            print("\ninstall with: %s dsh install --profile %s" % (PROG, report["profile"]))
+    return _emit(report, getattr(args, "json", False), human_status)
+
+
+def _layout_summary(result):
+    """Human-readable rendering of one layout operation result."""
+    operation = result.get("operation") or "?"
+    print("status   : %s (ok=%s)" % (result.get("status"), result.get("ok")))
+    print("operation: %s" % operation)
+    metadata = result.get("metadata") or {}
+    for key in ("engine", "target", "artifact", "command"):
+        if metadata.get(key):
+            print("%-9s: %s" % (key, metadata[key]))
+    data = result.get("data") or {}
+    if operation == "gen":
+        print("top      : %s" % data.get("top"))
+        print("counts   : %s" % data.get("counts"))
+        if data.get("bbox_um"):
+            print("bbox_um  : %s" % ", ".join("%.4g" % v for v in data["bbox_um"]))
+        print("layers   : %s" % ", ".join(data.get("layers") or []))
+    elif operation == "info":
+        print("top cells: %s" % ", ".join(data.get("top_cells") or []))
+        print("dbu      : %s" % data.get("dbu"))
+        for cell in data.get("cells") or []:
+            print("  cell %-20s shapes=%-5s instances=%-4s %s"
+                  % (cell.get("name"), cell.get("shapes"), cell.get("instances"),
+                     cell.get("shapes_by_layer")))
+        for layer in data.get("layers") or []:
+            print("  layer %d/%d %s" % (layer["layer"], layer["datatype"],
+                                        layer.get("name") or ""))
+    elif operation == "drc":
+        print("clean    : %s" % data.get("clean"))
+        print("violations: %s" % data.get("violations"))
+        for rule in data.get("rules") or []:
+            line = "  %-28s %-10s %s" % (rule.get("name"), rule.get("check"),
+                                         rule.get("violations"))
+            if rule.get("error"):
+                line += "  ERROR: %s" % rule["error"][:120]
+            print(line)
+            for marker in (rule.get("markers") or [])[:3]:
+                print("      at %s" % ", ".join("%.4g" % v for v in marker["bbox_um"]))
+    elif operation == "boolean":
+        print("op       : %s" % data.get("op"))
+        print("polygons : %s" % data.get("polygons"))
+        if data.get("bbox_um"):
+            print("bbox_um  : %s" % ", ".join("%.4g" % v for v in data["bbox_um"]))
+    timings = metadata.get("timings") or {}
+    if timings:
+        print("timings  : %s" % ", ".join("%s=%s" % item for item in timings.items()))
+    for error in result.get("errors") or []:
+        print("error    : %s" % error, file=sys.stderr)
+    for warning in (result.get("warnings") or [])[:5]:
+        print("warning  : %s" % warning, file=sys.stderr)
+
+
+def _load_json_argument(value, what):
+    """Accept inline JSON or a path to a JSON file."""
+    if value is None:
+        return None
+    text = value.strip()
+    if text.startswith(("{", "[")):
+        try:
+            return json.loads(text)
+        except ValueError as exc:
+            raise CliError("%s is not valid JSON: %s" % (what, exc))
+    if not os.path.isfile(text):
+        raise CliError("%s file not found: %s" % (what, text))
+    try:
+        with open(text, encoding="utf-8") as handle:
+            return json.load(handle)
+    except ValueError as exc:
+        raise CliError("%s file %s is not valid JSON: %s" % (what, text, exc))
+
+
+def cmd_layout_probe(args):
+    layout = _layout()
+    info = {"engine": layout.operations(), "probe": layout.probe()}
+
+    def human():
+        engine = info["engine"]
+        print("engine   : %s (%s -> %s)" % (engine["engine"], engine["binary_config"],
+                                            engine["default_binary"]))
+        print("invocation: %s" % engine["invocation"])
+        for name, text in engine["operations"].items():
+            print("  %-8s %s" % (name, text))
+        probe = info["probe"]
+        print("target   : %s (%s)" % (probe["target"], probe["target_reason"]))
+        print("available: %s %s" % (probe["available"],
+                                    probe["version"] or probe["detail"]))
+    return _emit(info, getattr(args, "json", False), human)
+
+
+def cmd_layout_gen(args):
+    layout = _layout()
+    spec = _load_json_argument(args.spec, "spec")
+    try:
+        result = layout.generate(spec, args.output, timeout=args.timeout)
+    except layout.LayoutError as exc:
+        raise CliError("layout generation could not start: %s" % exc,
+                       hint="run `%s layout probe` to check KLayout." % PROG)
+    return _emit(result, getattr(args, "json", False),
+                 lambda: _layout_summary(result)) or (0 if result.get("ok") else 1)
+
+
+def cmd_layout_info(args):
+    layout = _layout()
+    layers = _load_json_argument(args.layers, "layers")
+    try:
+        result = layout.info(args.file, layers=layers, timeout=args.timeout)
+    except layout.LayoutError as exc:
+        raise CliError(str(exc))
+    return _emit(result, getattr(args, "json", False),
+                 lambda: _layout_summary(result)) or (0 if result.get("ok") else 1)
+
+
+def cmd_layout_drc(args):
+    layout = _layout()
+    rules = _load_json_argument(args.rules, "rules")
+    layers = _load_json_argument(args.layers, "layers")
+    try:
+        result = layout.drc(args.file, rules, layers=layers, timeout=args.timeout)
+    except layout.LayoutError as exc:
+        raise CliError(str(exc))
+    _emit(result, getattr(args, "json", False), lambda: _layout_summary(result))
+    if not result.get("ok"):
+        return 1
+    # A check that reports violations must not exit 0: that is how a dirty
+    # layout would slip through CI. 3 is reserved for "ran, found violations"
+    # so it stays distinguishable from "could not run" (1).
+    if (result.get("data") or {}).get("clean") is False and not args.exit_zero:
+        return 3
+    return 0
+
+
+def cmd_layout_boolean(args):
+    layout = _layout()
+    layers = _load_json_argument(args.layers, "layers")
+    try:
+        result = layout.boolean(args.op, args.a, b=args.b, out_layer=args.out_layer,
+                                output=args.output, source=args.source,
+                                value=args.value, timeout=args.timeout)
+    except layout.LayoutError as exc:
+        raise CliError(str(exc))
+    return _emit(result, getattr(args, "json", False),
+                 lambda: _layout_summary(result)) or (0 if result.get("ok") else 1)
+
+
+def cmd_layout_tools(args):
+    layout = _layout()
+    tools = layout.stream_tools()
+    payload = {"engine": "klayout", "stream_tools": tools,
+               "invocation": "klayout's standalone stream tools (not on PATH)"}
+
+    def human():
+        if not tools:
+            print("no KLayout stream tools found; set PYAETHER_KLAYOUT_BUDDY_DIR to the "
+                  "directory holding them (on macOS: KLayout.app/Contents/Buddy)")
+            return
+        for key, path in sorted(tools.items()):
+            print("%-10s %s" % (key, path))
+    return _emit(payload, getattr(args, "json", False), human)
+
+
+def cmd_layout_convert(args):
+    layout = _layout()
+    try:
+        result = layout.convert(args.source, args.output, tool=args.tool,
+                                timeout=args.timeout)
+    except layout.LayoutError as exc:
+        raise CliError(str(exc))
+    return _emit(result, getattr(args, "json", False),
+                 lambda: _layout_summary(result)) or (0 if result.get("ok") else 1)
+
+
+def cmd_layout_compare(args):
+    layout = _layout()
+    try:
+        result = layout.compare(args.a, args.b, tool=args.tool, timeout=args.timeout)
+    except layout.LayoutError as exc:
+        raise CliError(str(exc))
+    if getattr(args, "json", False):
+        _print_json(result)
+    else:
+        code = (result.get("data") or {}).get("returncode")
+        identical = (result.get("data") or {}).get("identical")
+        print("tool      : %s" % args.tool)
+        print("identical : %s" % identical)
+        print("exit code : %s (0 = identical)" % code)
+        if args.tool == "xor":
+            print("output    : %s" % result["metadata"].get("output"))
+        if not result.get("ok") and result.get("errors"):
+            for error in result["errors"]:
+                print("error     : %s" % error, file=sys.stderr)
+            return 1
+    # Mirror strmcmp's own contract so the command can be used in a script.
+    return 0 if (result.get("data") or {}).get("identical") else 1
+
+
+def cmd_layout_deck(args):
+    layout = _layout()
+    try:
+        result = layout.deck(args.script, source=args.source, top=args.top,
+                             timeout=args.timeout, extra_args=args.define)
+    except layout.LayoutError as exc:
+        raise CliError(str(exc))
+    if getattr(args, "json", False):
+        _print_json(result)
+    else:
+        print("status   : %s (ok=%s)" % (result.get("status"), result.get("ok")))
+        print("deck     : %s (%s)" % (result["metadata"].get("deck"),
+                                      result["metadata"].get("deck_kind")))
+        print("command  : %s" % result["metadata"].get("command"))
+        print("exit code: %s" % (result.get("data") or {}).get("returncode"))
+        for path in (result.get("data") or {}).get("report_artifacts") or []:
+            print("report   : %s" % path)
+        out = ((result.get("data") or {}).get("stdout") or "").strip()
+        if out:
+            print("--- output ---")
+            print(out[-4000:])
+        for error in result.get("errors") or []:
+            print("error    : %s" % error, file=sys.stderr)
+    if not result.get("ok"):
+        return 1
+    return 0
+
+
 def _sim_summary(result):
     """Human-readable rendering of one simulation result."""
     print("status : %s (ok=%s)" % (result.get("status"), result.get("ok")))
@@ -756,6 +1081,121 @@ def build_parser():
     p_sim_run.add_argument("--run-id", help="suffix for the run directory name")
     p_sim_run.add_argument("--json", action="store_true", help="print raw JSON")
     p_sim_run.set_defaults(func=cmd_sim_run)
+
+    p_layout = sub.add_parser("layout", help="generate and check layouts with KLayout")
+    layout_sub = p_layout.add_subparsers(dest="layout_command", metavar="<operation>")
+
+    p_lay_probe = layout_sub.add_parser("probe", help="check that KLayout is available")
+    p_lay_probe.add_argument("--json", action="store_true", help="print raw JSON")
+    p_lay_probe.set_defaults(func=cmd_layout_probe)
+
+    p_lay_gen = layout_sub.add_parser("gen", help="build a GDS2/OASIS layout from a spec")
+    p_lay_gen.add_argument("spec", help="spec as inline JSON or a path to a .json file")
+    p_lay_gen.add_argument("-o", "--output", help="output layout path (.gds / .oas)")
+    p_lay_gen.add_argument("--timeout", type=float, help="timeout in seconds (default 600)")
+    p_lay_gen.add_argument("--json", action="store_true", help="print raw JSON")
+    p_lay_gen.set_defaults(func=cmd_layout_gen)
+
+    p_lay_info = layout_sub.add_parser("info", help="read a layout: cells, layers, shapes, extents")
+    p_lay_info.add_argument("file", help="layout file to read")
+    p_lay_info.add_argument("--layers", help="layer name map as JSON, e.g. '{\"m1\":[1,0]}'")
+    p_lay_info.add_argument("--timeout", type=float, help="timeout in seconds")
+    p_lay_info.add_argument("--json", action="store_true", help="print raw JSON")
+    p_lay_info.set_defaults(func=cmd_layout_info)
+
+    p_lay_drc = layout_sub.add_parser("drc", help="run width/space/notch/enclosing/area checks")
+    p_lay_drc.add_argument("file", help="layout file to check")
+    p_lay_drc.add_argument("--rules", required=True,
+                           help="rules as inline JSON or a path to a .json file")
+    p_lay_drc.add_argument("--layers", help="layer name map as JSON")
+    p_lay_drc.add_argument("--timeout", type=float, help="timeout in seconds")
+    p_lay_drc.add_argument("--exit-zero", action="store_true",
+                           help="exit 0 even when violations are found (for scripts that "
+                                "want to inspect them; default is 3)")
+    p_lay_drc.add_argument("--json", action="store_true", help="print raw JSON")
+    p_lay_drc.set_defaults(func=cmd_layout_drc)
+
+    p_lay_bool = layout_sub.add_parser("boolean", help="layer algebra between two layers")
+    p_lay_bool.add_argument("op", choices=["merge", "and", "not", "xor", "size", "grow", "shrink"])
+    p_lay_bool.add_argument("--a", required=True, help="first layer (name or [layer,datatype])")
+    p_lay_bool.add_argument("--b", help="second layer (and/not/xor)")
+    p_lay_bool.add_argument("--value", type=float, help="size in microns (size/grow/shrink)")
+    p_lay_bool.add_argument("--out-layer", required=True, help="layer for the result")
+    p_lay_bool.add_argument("--output", help="output layout path")
+    p_lay_bool.add_argument("--source", help="input layout; omit to build from the spec")
+    p_lay_bool.add_argument("--layers", help="layer name map as JSON")
+    p_lay_bool.add_argument("--timeout", type=float, help="timeout in seconds")
+    p_lay_bool.add_argument("--json", action="store_true", help="print raw JSON")
+    p_lay_bool.set_defaults(func=cmd_layout_boolean)
+
+    p_lay_tools = layout_sub.add_parser(
+        "tools", help="list KLayout's standalone stream tools on the target")
+    p_lay_tools.add_argument("--json", action="store_true", help="print raw JSON")
+    p_lay_tools.set_defaults(func=cmd_layout_tools)
+
+    p_lay_conv = layout_sub.add_parser(
+        "convert", help="convert or clip a layout with KLayout's stream tools")
+    p_lay_conv.add_argument("source", help="input layout file")
+    p_lay_conv.add_argument("output", help="output layout file")
+    p_lay_conv.add_argument("--tool", help="tool key (oasis/gds/cif/dxf/txt/mag/lstr/clip)")
+    p_lay_conv.add_argument("--timeout", type=float, help="timeout in seconds")
+    p_lay_conv.add_argument("--json", action="store_true", help="print raw JSON")
+    p_lay_conv.set_defaults(func=cmd_layout_convert)
+
+    p_lay_cmp = layout_sub.add_parser(
+        "compare", help="compare two layouts (exit code 0 = identical)")
+    p_lay_cmp.add_argument("a", help="first layout")
+    p_lay_cmp.add_argument("b", help="second layout")
+    p_lay_cmp.add_argument("--tool", default="compare", choices=["compare", "xor"],
+                           help="compare with strmcmp (default) or XOR with strmxor")
+    p_lay_cmp.add_argument("--timeout", type=float, help="timeout in seconds")
+    p_lay_cmp.add_argument("--json", action="store_true", help="print raw JSON")
+    p_lay_cmp.set_defaults(func=cmd_layout_compare)
+
+    p_lay_deck = layout_sub.add_parser(
+        "deck", help="run a KLayout rule deck (.drc / .lvs) with the real engine")
+    p_lay_deck.add_argument("script", help="rule deck (.drc or .lvs)")
+    p_lay_deck.add_argument("--source", help="layout passed to the deck as $source")
+    p_lay_deck.add_argument("--top", help="top cell passed to the deck")
+    p_lay_deck.add_argument("--define", action="append", metavar="NAME=VALUE",
+                            help="extra -rd variable; repeatable")
+    p_lay_deck.add_argument("--timeout", type=float, help="timeout in seconds")
+    p_lay_deck.add_argument("--json", action="store_true", help="print raw JSON")
+    p_lay_deck.set_defaults(func=cmd_layout_deck)
+
+    p_dsh = sub.add_parser("dsh",
+                           help="use this bridge as a DeepSeek Harness plugin")
+    dsh_sub = p_dsh.add_subparsers(dest="dsh_command", metavar="<operation>")
+
+    def _dsh_common(parser, need_profile=False):
+        parser.add_argument("--profile", default="web",
+                            help="harness profile to target (default web)")
+        parser.add_argument("--dsh-home",
+                            help="override $DSH_HOME (default ~/.dsh)")
+        parser.add_argument("--json", action="store_true", help="print raw JSON")
+
+    p_dsh_status = dsh_sub.add_parser("status", help="is the plugin installed for a profile")
+    _dsh_common(p_dsh_status)
+    p_dsh_status.set_defaults(func=cmd_dsh)
+
+    p_dsh_patch = dsh_sub.add_parser("patch", help="print the profile patch to paste in")
+    _dsh_common(p_dsh_patch)
+    p_dsh_patch.set_defaults(func=cmd_dsh)
+
+    p_dsh_install = dsh_sub.add_parser("install", help="write the patch entry and install the skill")
+    _dsh_common(p_dsh_install)
+    p_dsh_install.add_argument("--dry-run", action="store_true",
+                               help="show what would be written, change nothing")
+    p_dsh_install.set_defaults(func=cmd_dsh)
+
+    p_dsh_uninstall = dsh_sub.add_parser("uninstall", help="remove the entry and the skill")
+    _dsh_common(p_dsh_uninstall)
+    p_dsh_uninstall.set_defaults(func=cmd_dsh)
+
+    p_dsh_verify = dsh_sub.add_parser(
+        "verify", help="check that the harness really composes the entry (runs dsh --dump-config)")
+    _dsh_common(p_dsh_verify)
+    p_dsh_verify.set_defaults(func=cmd_dsh)
 
     p_version = sub.add_parser("version", help="show the version")
     p_version.add_argument("--json", action="store_true", help="print raw JSON")

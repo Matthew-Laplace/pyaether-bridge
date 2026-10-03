@@ -201,6 +201,19 @@ SPECTRE_MODE = setting("PYAETHER_SPECTRE_MODE", "spectre_mode", "ax")
 ALPS_BIN = setting("PYAETHER_ALPS_BIN", "alps_bin", "alps")
 ALPS_THREADS = setting("PYAETHER_ALPS_THREADS", "alps_threads", "")
 
+# --- layout (KLayout) -----------------------------------------------------
+# KLayout is open source and usually not part of the EDA installation, so like
+# the simulator target it defaults to this machine when the binary is here.
+KLAYOUT_BIN = setting("PYAETHER_KLAYOUT_BIN", "klayout_bin", "klayout")
+KLAYOUT_TARGET = setting("PYAETHER_KLAYOUT_TARGET", "klayout_target", "")
+# KLayout also ships standalone stream tools (strm2oas, strm2gds, strmcmp,
+# strmclip, strmxor, ...). They are not on PATH -- on macOS they live in
+# KLayout.app/Contents/Buddy -- so the directory is configurable and empty means
+# "look next to the klayout binary".
+KLAYOUT_BUDDY_DIR = setting("PYAETHER_KLAYOUT_BUDDY_DIR", "klayout_buddy_dir", "")
+LAYOUT_WORKDIR = setting("PYAETHER_LAYOUT_WORKDIR", "layout_workdir", "/tmp/pyaether-layout")
+LAYOUT_TIMEOUT = setting("PYAETHER_LAYOUT_TIMEOUT", "layout_timeout", "600")
+
 # Each profile gets its own socket/pid/log: two profiles point at different
 # targets, so sharing one daemon would hand out the wrong session.
 RUNTIME_DIR = (DATA_DIR / "profiles" / PROFILE) if PROFILE else DATA_DIR
