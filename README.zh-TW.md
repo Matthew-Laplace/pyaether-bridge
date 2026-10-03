@@ -219,10 +219,16 @@ scp -r "aether@lab-server:$DOCS" ./data/docs
 
 ## 已知限制
 
+- **第三方權利。** 本專案為非官方專案，不隨附任何廠商軟體或文件；API 目錄是由你
+  自己已授權的安裝在本機產生的。若華大九天（Empyrean Technology）認為本專案有任何
+  內容涉及侵權，請
+  [開立 Issue](https://github.com/Matthew-Laplace/pyaether-bridge/issues)，
+  我們會盡快修改或移除。
 - **一個授權席位。** 常駐 session 在執行期間會一直佔住一個 `PY_AETHER` 席位；
   同時再開另一個獨立的 PyAether 行程可能會取不到授權。
-- **OA 存取是序列化的。** 所有請求都會經過 daemon 內同一把鎖。這適合除錯與批次
-  作業，不適合高並行的服務情境。
+- **OA 存取是序列化的。** 所有請求都會經過 daemon 內同一把鎖，因此耗時較久的
+  `exec` 會阻塞其他所有呼叫，直到它完成或逾時。這適合除錯與批次作業，不適合
+  高並行的服務情境。
 - **目標重啟。** 容器重建或伺服器重開之後，先前保存的 session 會失效；下一次
   請求會自動重建（重新 import pyAether，數秒），舊命名空間裡的變數會遺失。
 - **SSH 認證。** 只使用你現有的 SSH 設定／ssh-agent。bridge 強制 `BatchMode`，
@@ -234,6 +240,13 @@ scp -r "aether@lab-server:$DOCS" ./data/docs
   唯讀。
 - **僅限目標端的 Python。** bridge 依賴 Aether 內附的 Python 3.9 與 OpenAccess
   共享函式庫。宿主端程式碼不做任何 EDA 運算，只負責轉送請求與檢索目錄。
+- **`ssh` 傳輸只用樁驗證過。** docker 與 local 兩條路徑已做過端到端實測，ssh 則是
+  以忠實重現遠端 shell 語意的樁驗證；尚未對真實遠端伺服器跑過。第一次實際上線
+  請當成測試。
+- **僅支援 POSIX 宿主。** daemon 透過 unix domain socket 通訊，因此執行 CLI / MCP
+  伺服器的宿主必須是 macOS 或 Linux；原生 Windows 不支援。
+- **僅存在於執行期的符號簽章較弱。** `runtime` 類條目來自對 SWIG 物件做 `inspect`，
+  經常只顯示 `(*args, **kwargs)`。帶完整型別的簽章在文件條目裡，搜尋時會優先給出。
 
 ## 測試
 

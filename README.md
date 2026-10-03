@@ -238,10 +238,17 @@ repository:
 
 ## Known limitations
 
+- **Third-party rights.** This is an unofficial project: it ships no vendor
+  software or documentation, and the API catalog is generated locally from your
+  own licensed installation. If Empyrean Technology believes any material here
+  infringes its rights, please
+  [open an issue](https://github.com/Matthew-Laplace/pyaether-bridge/issues) and
+  it will be modified or removed promptly.
 - **One license seat.** The resident session holds a `PY_AETHER` seat for as
   long as it runs; a second independent PyAether process may fail to check one
   out.
-- **Serialized OA access.** Every request goes through a single daemon lock.
+- **Serialized OA access.** Every request goes through a single daemon lock, so a
+  long-running `exec` blocks every other call until it finishes or times out.
   That suits debugging and batch jobs, not high-concurrency serving.
 - **Target restarts.** After a container rebuild or server reboot the saved
   session dies; the next request rebuilds it automatically (re-importing
@@ -257,6 +264,17 @@ repository:
 - **Target-side Python only.** The bridge relies on Aether's bundled Python 3.9
   and OpenAccess shared libraries. Host-side code performs no EDA computation —
   it only forwards requests and searches the catalog.
+- **The `ssh` transport has only been exercised against a stub.** Docker and
+  local were validated end to end, and ssh against a stub that faithfully
+  reproduces remote-shell semantics — but not yet against a real remote server.
+  Treat the first real deployment as a test.
+- **POSIX hosts only.** The daemon communicates over a unix domain socket, so
+  the host running the CLI / MCP server must be macOS or Linux; native Windows
+  is not supported.
+- **Runtime-only symbols have weak signatures.** `runtime` entries come from
+  `inspect` on SWIG objects and often read `(*args, **kwargs)`. The fully typed
+  signatures live in the documentation entries, which is why search ranks those
+  first.
 
 ## Tests
 
