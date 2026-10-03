@@ -21,6 +21,10 @@ server, one environment variable apart):
 > software, binaries, or documentation. You need your own **licensed** Aether
 > installation and license. See [docs/INSTALL.md](docs/INSTALL.md) for target
 > preparation.
+>
+> If Empyrean Technology (华大九天) believes that this project infringes any of
+> its rights, please [open an issue](https://github.com/Matthew-Laplace/pyaether-bridge/issues)
+> and we will modify or remove the material in question as soon as possible.
 
 ```bash
 git clone https://github.com/Matthew-Laplace/pyaether-bridge.git

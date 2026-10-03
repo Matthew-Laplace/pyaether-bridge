@@ -18,6 +18,10 @@
 > **非官方專案。** 與華大九天（Empyrean）沒有任何隸屬、背書或支援關係。本專案
 > 不包含、也不散布任何廠商軟體、二進位檔或文件。你需要自己**已授權**的 Aether
 > 安裝與授權。目標環境的準備請見 [docs/INSTALL.md](docs/INSTALL.md)。
+>
+> 若華大九天（Empyrean Technology）認為本專案涉及任何侵權，請
+> [開立 Issue](https://github.com/Matthew-Laplace/pyaether-bridge/issues)
+> 通知我們，我們會盡快修改或移除相關內容。
 
 ```bash
 git clone https://github.com/Matthew-Laplace/pyaether-bridge.git

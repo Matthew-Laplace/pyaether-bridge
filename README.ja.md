@@ -21,6 +21,10 @@ Empyrean Aether / PyAether をコマンドラインツールと MCP サーバー
 > 一切含まず、配布もしません。**正規ライセンス**の Aether インストールと
 > ライセンスが別途必要です。ターゲットの準備は
 > [docs/INSTALL.md](docs/INSTALL.md) を参照してください。
+>
+> 華大九天（Empyrean Technology）が本プロジェクトについて権利侵害があると
+> お考えの場合は、[Issue を作成](https://github.com/Matthew-Laplace/pyaether-bridge/issues)
+> してご連絡ください。速やかに修正または削除いたします。
 
 ```bash
 git clone https://github.com/Matthew-Laplace/pyaether-bridge.git
