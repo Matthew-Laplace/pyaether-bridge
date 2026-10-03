@@ -1,6 +1,6 @@
 # pyaether-bridge
 
-[English](README.md) | **日本語**
+[English](README.md) | **日本語** | [繁體中文](README.zh-TW.md)
 
 Empyrean Aether / PyAether をコマンドラインツールと MCP サーバーに変換します。
 常駐 daemon がターゲット上で pyAether セッションを 1 つ維持し、オフラインの API
@@ -264,6 +264,7 @@ PYAETHER_TEST_DOCKER=1 python3 tests/transport_probe.py   # 実コンテナも�
 - [docs/INSTALL.md](docs/INSTALL.md) — ターゲットの準備、セルフチェック、トラブルシューティング
 - [ARCHITECTURE.md](ARCHITECTURE.md) — モジュール構成、内部インターフェース、通信フォーマット
 - [README.md](README.md) — English version
+- [README.zh-TW.md](README.zh-TW.md) — 繁體中文版
 
 ## ライセンス
 

@@ -1,6 +1,6 @@
 # pyaether-bridge
 
-**English** | [日本語](README.ja.md)
+**English** | [日本語](README.ja.md) | [繁體中文](README.zh-TW.md)
 
 Bridge Empyrean Aether / PyAether into a command line tool and an MCP server.
 A resident daemon keeps one pyAether session alive on the target, and an offline
@@ -268,6 +268,7 @@ PYAETHER_TEST_DOCKER=1 python3 tests/transport_probe.py   # also exercise a real
 - [docs/INSTALL.md](docs/INSTALL.md) — target preparation, self-checks, troubleshooting
 - [ARCHITECTURE.md](ARCHITECTURE.md) — module layout, internal interfaces, wire format
 - [README.ja.md](README.ja.md) — 日本語版
+- [README.zh-TW.md](README.zh-TW.md) — 繁體中文版
 
 ## License
 
