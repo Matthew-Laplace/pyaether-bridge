@@ -222,11 +222,18 @@ def build_mini_catalog(path):
               name TEXT PRIMARY KEY, kind TEXT, module TEXT, signature TEXT,
               summary TEXT, description TEXT, params TEXT, returns TEXT,
               page TEXT, anchor TEXT, domain TEXT);
-            CREATE VIRTUAL TABLE entries_fts USING fts5(
-              name, module, signature, summary, description, kind, domain);
             CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
             """
         )
+        # The FTS index is optional: some SQLite builds ship without FTS5, and
+        # the catalog falls back to LIKE search there.
+        try:
+            con.execute(
+                "CREATE VIRTUAL TABLE entries_fts USING fts5("
+                "name, module, signature, summary, description, kind, domain)")
+            has_fts = True
+        except sqlite3.Error:
+            has_fts = False
         for entry in MINI_ENTRIES:
             con.execute(
                 "INSERT INTO entries(name, kind, module, signature, summary, description,"
@@ -239,14 +246,15 @@ def build_mini_catalog(path):
                     entry["page"], entry["anchor"], entry["domain"],
                 ),
             )
-            con.execute(
-                "INSERT INTO entries_fts(name, module, signature, summary, description,"
-                " kind, domain) VALUES (?,?,?,?,?,?,?)",
-                (
-                    entry["name"], entry["module"], entry["signature"], entry["summary"],
-                    entry["description"], entry["kind"], entry["domain"],
-                ),
-            )
+            if has_fts:
+                con.execute(
+                    "INSERT INTO entries_fts(name, module, signature, summary, description,"
+                    " kind, domain) VALUES (?,?,?,?,?,?,?)",
+                    (
+                        entry["name"], entry["module"], entry["signature"], entry["summary"],
+                        entry["description"], entry["kind"], entry["domain"],
+                    ),
+                )
         con.executemany(
             "INSERT INTO meta(key, value) VALUES (?,?)",
             [

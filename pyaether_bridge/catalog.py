@@ -224,6 +224,13 @@ def _page_worker(args):
 
 
 def _create_schema(conn):
+    """Create the catalog tables, with the FTS index only when it is supported.
+
+    Some Python builds ship a SQLite compiled without FTS5 (measured: sqlite
+    3.25.3 in a Debian container). Without this guard `api build` would abort
+    with "no such module: fts5"; instead the catalog is created without the
+    index and search falls back to LIKE, which is slower but correct.
+    """
     conn.executescript(
         """
         DROP TABLE IF EXISTS entries;
@@ -233,11 +240,23 @@ def _create_schema(conn):
           name TEXT PRIMARY KEY, kind TEXT, module TEXT, signature TEXT,
           summary TEXT, description TEXT, params TEXT, returns TEXT,
           page TEXT, anchor TEXT, domain TEXT);
-        CREATE VIRTUAL TABLE entries_fts USING fts5(
-          name, module, signature, summary, description, kind, domain);
         CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
         """
     )
+    try:
+        conn.execute(
+            "CREATE VIRTUAL TABLE entries_fts USING fts5("
+            "name, module, signature, summary, description, kind, domain)")
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def _has_fts(conn):
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entries_fts'"
+    ).fetchone()
+    return bool(row)
 
 
 def build_from_html(docs_html_dir, out_db, *, jobs=1, progress=None):
@@ -312,22 +331,24 @@ def build_from_html(docs_html_dir, out_db, *, jobs=1, progress=None):
         ))
     conn = sqlite3.connect(out_db)
     try:
-        _create_schema(conn)
+        fts_available = _create_schema(conn)
         conn.executemany(
             "INSERT OR REPLACE INTO entries(name, kind, module, signature, summary,"
             " description, params, returns, page, anchor, domain)"
             " VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
-        conn.execute(
-            "INSERT INTO entries_fts(rowid, name, module, signature, summary,"
-            " description, kind, domain)"
-            " SELECT rowid, name, module, signature, summary, description, kind, domain"
-            " FROM entries")
+        if fts_available:
+            conn.execute(
+                "INSERT INTO entries_fts(rowid, name, module, signature, summary,"
+                " description, kind, domain)"
+                " SELECT rowid, name, module, signature, summary, description,"
+                " kind, domain FROM entries")
         conn.executemany("INSERT OR REPLACE INTO meta(key, value) VALUES (?,?)", [
             ("entries", str(len(rows))),
             ("pages", str(len(order))),
             ("built_at", time.strftime("%Y-%m-%d %H:%M:%S")),
             ("source_dir", docs_dir),
             ("schema_version", SCHEMA_VERSION),
+            ("fts5", "1" if fts_available else "0"),
         ])
         conn.commit()
         counts = dict(conn.execute(
@@ -504,11 +525,14 @@ def sync_from_runtime(*, db_path=None, timeout=300.0, target=None):
 
     conn = sqlite3.connect(path)
     try:
+        fts_available = _has_fts(conn)
         # Drop the old runtime entries first so this command is repeatable (and so early naming schemes can be upgraded).
         stale = [row[0] for row in conn.execute("SELECT rowid FROM entries WHERE kind = 'runtime'")]
         if stale:
             conn.executemany("DELETE FROM entries WHERE rowid = ?", [(rowid,) for rowid in stale])
-            conn.executemany("DELETE FROM entries_fts WHERE rowid = ?", [(rowid,) for rowid in stale])
+            if fts_available:
+                conn.executemany("DELETE FROM entries_fts WHERE rowid = ?",
+                                 [(rowid,) for rowid in stale])
         known = {row[0] for row in conn.execute("SELECT name FROM entries")}
         rows = []
         for name, (type_name, signature, first_doc_line) in symbols.items():
@@ -525,11 +549,12 @@ def sync_from_runtime(*, db_path=None, timeout=300.0, target=None):
             "INSERT OR REPLACE INTO entries(name, kind, module, signature, summary,"
             " description, params, returns, page, anchor, domain)"
             " VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
-        conn.execute(
-            "INSERT INTO entries_fts(rowid, name, module, signature, summary,"
-            " description, kind, domain) SELECT rowid, name, module, signature,"
-            " summary, description, kind, domain FROM entries"
-            " WHERE rowid NOT IN (SELECT rowid FROM entries_fts)")
+        if fts_available:
+            conn.execute(
+                "INSERT INTO entries_fts(rowid, name, module, signature, summary,"
+                " description, kind, domain) SELECT rowid, name, module, signature,"
+                " summary, description, kind, domain FROM entries"
+                " WHERE rowid NOT IN (SELECT rowid FROM entries_fts)")
         total = conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
         conn.executemany("INSERT OR REPLACE INTO meta(key, value) VALUES (?,?)", [
             ("entries", str(total)),
