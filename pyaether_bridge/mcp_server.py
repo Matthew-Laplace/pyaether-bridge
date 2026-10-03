@@ -336,6 +336,44 @@ TOOLS = [
             ("script",),
         ),
     },
+    {
+        "name": "pyaether_sch_build",
+        "description": "Create a schematic in Aether from an analog-agent.schematic "
+                        "snapshot or an Analog Canvas document (the drawing made in "
+                        "a canvas becomes a real schematic).",
+        "inputSchema": _object_schema(
+            {
+                "spec": {
+                    "type": "object",
+                    "description": "Snapshot or canvas document with instances, nets "
+                                   "and (optionally) netlist.terminals.",
+                },
+                "library": {"type": "string",
+                            "description": "Target library (overrides the spec)."},
+                "cell": {"type": "string", "description": "Target cell."},
+                "view": {"type": "string", "default": "schematic"},
+                "timeout": {"type": "number", "minimum": 1, "maximum": 86400,
+                            "default": 600},
+            },
+            ("spec",),
+        ),
+    },
+    {
+        "name": "pyaether_sch_netlist",
+        "description": "Emit SPICE netlist text from a snapshot's connectivity "
+                        "(works without a live session).",
+        "inputSchema": _object_schema(
+            {
+                "spec": {"type": "object", "description": "Snapshot or canvas document."},
+                "subckt": {"type": "string", "description": "Subcircuit name."},
+                "schematic_library": {"type": "string",
+                                      "description": "Target library when the drawing "
+                                                     "is not bound yet."},
+                "cell": {"type": "string", "description": "Target cell name."},
+            },
+            ("spec",),
+        ),
+    },
 ]
 
 TOOL_NAMES = tuple(tool["name"] for tool in TOOLS)
@@ -726,6 +764,50 @@ def _tool_layout_deck(arguments):
     return _format_layout(result), not bool(result.get("ok"))
 
 
+def _tool_sch_build(arguments):
+    spec = arguments.get("spec")
+    if not isinstance(spec, dict) or not spec:
+        raise _BadArgument("argument spec must be a non-empty object")
+    for name in ("library", "cell", "view"):
+        value = arguments.get(name)
+        if value is not None and not isinstance(value, str):
+            raise _BadArgument("argument %s must be a string" % name)
+    timeout = _clamp_number(arguments.get("timeout", 600), "timeout", 1, 86400, False)
+    schematic = _load("schematic")
+    try:
+        result = schematic.build(spec, library=arguments.get("library"),
+                                 cell=arguments.get("cell"),
+                                 view=arguments.get("view") or "schematic",
+                                 timeout=timeout)
+    except schematic.SchematicError as exc:
+        return "schematic build could not start: %s" % exc, True
+    created = result["data"].get("created") or {}
+    lines = ["status: %s (ok=%s)" % (result.get("status"), result.get("ok")),
+             "design: %s" % (result["data"].get("design") or {}),
+             "created: instances=%s nets=%s inst_terms=%s terminals=%s"
+             % (created.get("instances"), created.get("nets"),
+                created.get("inst_terms"), created.get("terminals"))]
+    for problem in (result["data"].get("problems") or [])[:8]:
+        lines.append("problem: %s" % problem)
+    for error in result.get("errors") or []:
+        lines.append("error: %s" % error)
+    return "\n".join(lines), not bool(result.get("ok"))
+
+
+def _tool_sch_netlist(arguments):
+    spec = arguments.get("spec")
+    if not isinstance(spec, dict) or not spec:
+        raise _BadArgument("argument spec must be a non-empty object")
+    schematic = _load("schematic")
+    try:
+        text = schematic.netlist(spec, subckt=arguments.get("subckt"),
+                                 library=arguments.get("schematic_library"),
+                                 cell=arguments.get("cell"))
+    except schematic.SchematicError as exc:
+        return "netlist could not be produced: %s" % exc, True
+    return text, False
+
+
 _TOOL_HANDLERS.update(
     {
         "pyaether_status": _tool_status,
@@ -740,6 +822,8 @@ _TOOL_HANDLERS.update(
         "pyaether_layout_convert": _tool_layout_convert,
         "pyaether_layout_compare": _tool_layout_compare,
         "pyaether_layout_deck": _tool_layout_deck,
+        "pyaether_sch_build": _tool_sch_build,
+        "pyaether_sch_netlist": _tool_sch_netlist,
     }
 )
 

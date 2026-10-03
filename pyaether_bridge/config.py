@@ -214,6 +214,14 @@ KLAYOUT_BUDDY_DIR = setting("PYAETHER_KLAYOUT_BUDDY_DIR", "klayout_buddy_dir", "
 LAYOUT_WORKDIR = setting("PYAETHER_LAYOUT_WORKDIR", "layout_workdir", "/tmp/pyaether-layout")
 LAYOUT_TIMEOUT = setting("PYAETHER_LAYOUT_TIMEOUT", "layout_timeout", "600")
 
+# --- schematic round trip -------------------------------------------------
+# Where generated schematics are staged on the target, and how the target's
+# library definitions are found (aether's lib.defs registers the libraries; a
+# library that is not registered cannot be opened).
+SCHEMATIC_WORKDIR = setting("PYAETHER_SCH_WORKDIR", "sch_workdir", "/tmp/pyaether-sch")
+SCHEMATIC_LIBDEFS = setting("PYAETHER_SCH_LIBDEFS", "sch_libdefs", "")
+SCHEMATIC_AETHER_ROOT = setting("PYAETHER_SCH_AETHER_ROOT", "sch_aether_root", "")
+
 # Each profile gets its own socket/pid/log: two profiles point at different
 # targets, so sharing one daemon would hand out the wrong session.
 RUNTIME_DIR = (DATA_DIR / "profiles" / PROFILE) if PROFILE else DATA_DIR

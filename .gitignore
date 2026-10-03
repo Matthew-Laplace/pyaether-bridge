@@ -9,6 +9,8 @@
 *.pid
 *.log
 daemon.lock
+# 测试/探针产物
+/work/
 
 # Python
 __pycache__/

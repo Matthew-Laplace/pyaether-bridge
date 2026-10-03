@@ -217,6 +217,8 @@ EXPECTED_TOOLS = {
     "pyaether_layout_convert": ["source", "output"],
     "pyaether_layout_compare": ["a", "b"],
     "pyaether_layout_deck": ["script"],
+    "pyaether_sch_build": ["spec"],
+    "pyaether_sch_netlist": ["spec"],
 }
 
 

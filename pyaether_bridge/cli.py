@@ -83,6 +83,108 @@ def _dsh():
     return _load("dsh")
 
 
+def _schematic():
+    return _load("schematic")
+
+
+def cmd_sch_snapshot(args):
+    sch = _schematic()
+    try:
+        result = sch.snapshot(args.library, args.cell, args.view, timeout=args.timeout)
+    except sch.SchematicError as exc:
+        raise CliError(str(exc))
+    if args.out and result.get("ok"):
+        with open(args.out, "w", encoding="utf-8") as handle:
+            json.dump(result["data"]["snapshot"], handle, ensure_ascii=False, indent=1)
+        result["metadata"]["written"] = os.path.abspath(args.out)
+    if getattr(args, "json", False):
+        _print_json(result)
+    else:
+        print("status : %s" % result["status"])
+        print("design : %s/%s/%s" % (args.library, args.cell, args.view))
+        counts = result["data"].get("counts") or {}
+        if counts:
+            print("counts : instances=%s nets=%s terminals=%s"
+                  % (counts.get("instances"), counts.get("nets"),
+                     counts.get("terminals")))
+        if args.out:
+            print("written: %s" % os.path.abspath(args.out))
+        for error in result["errors"]:
+            print("error  : %s" % error, file=sys.stderr)
+    return 0 if result.get("ok") else 1
+
+
+def cmd_sch_build(args):
+    sch = _schematic()
+    try:
+        result = sch.build(args.spec, library=args.library, cell=args.cell,
+                           view=args.view, timeout=args.timeout)
+    except sch.SchematicError as exc:
+        raise CliError(str(exc),
+                       hint="run `%s sch snapshot` or check the spec's source block."
+                            % PROG)
+    if getattr(args, "json", False):
+        _print_json(result)
+    else:
+        print("status : %s" % result["status"])
+        created = result["data"].get("created") or {}
+        if created:
+            print("created: instances=%s nets=%s inst_terms=%s terminals=%s"
+                  % (created.get("instances"), created.get("nets"),
+                     created.get("inst_terms"), created.get("terminals")))
+        print("design : %s" % (result["data"].get("design") or ""))
+        if result["metadata"].get("auto_placed"):
+            print("note   : no coordinates in the spec, instances were spread on a grid")
+        for problem in (result["data"].get("problems") or [])[:8]:
+            print("problem: %s" % problem, file=sys.stderr)
+        for error in result["errors"][:8]:
+            print("error  : %s" % error, file=sys.stderr)
+    return 0 if result.get("ok") else 1
+
+
+def cmd_sch_netlist(args):
+    sch = _schematic()
+    try:
+        text = sch.netlist(args.spec, subckt=args.subckt, library=args.library,
+                           cell=args.cell, view=args.view)
+    except sch.SchematicError as exc:
+        raise CliError(str(exc))
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        if not getattr(args, "json", False):
+            print("written: %s" % os.path.abspath(args.out))
+            return 0
+    if getattr(args, "json", False):
+        _print_json({"ok": True, "netlist": text})
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
+def cmd_sch_roundtrip(args):
+    sch = _schematic()
+    try:
+        result = sch.roundtrip(args.spec, timeout=args.timeout)
+    except sch.SchematicError as exc:
+        raise CliError(str(exc))
+
+    def human():
+        data = result["data"]
+        print("status  : %s" % result["status"])
+        print("created : %s" % (data.get("created") or {}))
+        print("readback: %s" % (data.get("read_back") or {}))
+        print("expected: %s" % (data.get("expected") or {}))
+        print("missing connections: %s" % data.get("missing_connections_total"))
+        print("extra connections  : %s" % data.get("unexpected_connections_total"))
+        for error in (result.get("errors") or [])[:6]:
+            print("error   : %s" % error, file=sys.stderr)
+        for problem in (data.get("problems") or [])[:6]:
+            print("problem : %s" % problem, file=sys.stderr)
+    _emit(result, getattr(args, "json", False), human)
+    return 0 if result.get("ok") else 1
+
+
 # --------------------------------------------------------------------------- #
 # output helpers
 # --------------------------------------------------------------------------- #
@@ -1196,6 +1298,44 @@ def build_parser():
         "verify", help="check that the harness really composes the entry (runs dsh --dump-config)")
     _dsh_common(p_dsh_verify)
     p_dsh_verify.set_defaults(func=cmd_dsh)
+
+    p_sch = sub.add_parser("sch", help="schematic round trip (canvas <-> Aether)")
+    sch_sub = p_sch.add_subparsers(dest="sch_command", metavar="<operation>")
+
+    p_sch_snap = sch_sub.add_parser("snapshot", help="read a live schematic into a snapshot")
+    p_sch_snap.add_argument("library", help="library name, e.g. myLib")
+    p_sch_snap.add_argument("cell", help="cell name")
+    p_sch_snap.add_argument("--view", default="schematic")
+    p_sch_snap.add_argument("-o", "--out", help="write the snapshot JSON here")
+    p_sch_snap.add_argument("--timeout", type=float, default=300.0)
+    p_sch_snap.add_argument("--json", action="store_true")
+    p_sch_snap.set_defaults(func=cmd_sch_snapshot)
+
+    p_sch_build = sch_sub.add_parser("build", help="create a schematic from a snapshot/canvas")
+    p_sch_build.add_argument("spec", help="snapshot or canvas document (JSON file or inline)")
+    p_sch_build.add_argument("--library", help="target library (overrides the spec)")
+    p_sch_build.add_argument("--cell", help="target cell (overrides the spec)")
+    p_sch_build.add_argument("--view", default="schematic")
+    p_sch_build.add_argument("--timeout", type=float, default=600.0)
+    p_sch_build.add_argument("--json", action="store_true")
+    p_sch_build.set_defaults(func=cmd_sch_build)
+
+    p_sch_net = sch_sub.add_parser("netlist", help="emit SPICE text from a spec")
+    p_sch_net.add_argument("spec", help="snapshot or canvas document")
+    p_sch_net.add_argument("-o", "--out", help="write the netlist here (default stdout)")
+    p_sch_net.add_argument("--subckt", help="subcircuit name (default: the cell name)")
+    p_sch_net.add_argument("--library", help="target library (for an unbound drawing)")
+    p_sch_net.add_argument("--cell", help="target cell (for an unbound drawing)")
+    p_sch_net.add_argument("--view", default="schematic")
+    p_sch_net.add_argument("--json", action="store_true")
+    p_sch_net.set_defaults(func=cmd_sch_netlist)
+
+    p_sch_rt = sch_sub.add_parser("roundtrip",
+                                  help="build, read back and compare the connectivity")
+    p_sch_rt.add_argument("spec", help="snapshot or canvas document")
+    p_sch_rt.add_argument("--timeout", type=float, default=900.0)
+    p_sch_rt.add_argument("--json", action="store_true")
+    p_sch_rt.set_defaults(func=cmd_sch_roundtrip)
 
     p_version = sub.add_parser("version", help="show the version")
     p_version.add_argument("--json", action="store_true", help="print raw JSON")
