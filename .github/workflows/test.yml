@@ -52,6 +52,12 @@ jobs:
       - name: Simulator probe (real ngspice run against theory)
         run: python tests/simulator_probe.py
 
+      - name: Profile resolution probe
+        run: python tests/profile_probe.py
+
+      - name: Vendor simulator probe (skips without ALPS and a licence)
+        run: python tests/alps_live_probe.py
+
       - name: Guard against committing generated catalogs
         # data/catalog.sqlite is derived from vendor documentation; shipping it
         # would redistribute vendor material. It must stay out of the repo.
