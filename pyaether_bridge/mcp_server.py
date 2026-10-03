@@ -17,6 +17,7 @@ first tool call.
 from __future__ import annotations
 
 import importlib
+import hashlib
 import json
 import os
 import sys
@@ -31,7 +32,10 @@ INSTRUCTIONS = (
     "API, pyaether_api_help to read its signature and parameters, then "
     "pyaether_exec to run Python inside the resident PyAether session. The host "
     "daemon is started automatically (forbidden when "
-    "PYAETHER_BRIDGE_NO_AUTOSTART=1); pyaether_status only reads state."
+    "PYAETHER_BRIDGE_NO_AUTOSTART=1); pyaether_status only reads state. "
+    "pyaether_sim_run runs a netlist on a switchable simulator: open-source "
+    "ngspice, Cadence Spectre/APS on the target, or a configured custom "
+    "command. Treat the returned ok/status as the execution contract."
 )
 
 _MISSING = object()
@@ -153,6 +157,38 @@ TOOLS = [
                 },
             },
             ("code",),
+        ),
+    },
+    {
+        "name": "pyaether_sim_run",
+        "description": "Run a SPICE netlist on the chosen simulator (ngspice, "
+                        "Spectre/APS, or a configured custom command) and return "
+                        "parsed results. Check the returned ok/status before using data.",
+        "inputSchema": _object_schema(
+            {
+                "netlist": {
+                    "type": "string",
+                    "description": "Netlist to run; sent to the target as text.",
+                },
+                "backend": {
+                    "type": "string",
+                    "enum": ["ngspice", "spectre", "custom"],
+                    "description": "Simulator backend; defaults to PYAETHER_SIM_BACKEND "
+                                   "(ngspice).",
+                },
+                "mode": {
+                    "type": "string",
+                    "description": "Spectre engine/preset (aps, ax, mx, ...); ignored by ngspice.",
+                },
+                "timeout": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": 86400,
+                    "default": 600,
+                    "description": "Simulation timeout in seconds, default 600.",
+                },
+            },
+            ("netlist",),
         ),
     },
 ]
@@ -298,12 +334,74 @@ def _tool_exec(arguments):
     return _format_exec(result), not bool(result.get("ok"))
 
 
+def _tool_sim_run(arguments):
+    netlist = arguments.get("netlist")
+    if not isinstance(netlist, str) or not netlist.strip():
+        raise _BadArgument("argument netlist must be a non-empty string")
+    backend = arguments.get("backend")
+    if backend is not None and not isinstance(backend, str):
+        raise _BadArgument("argument backend must be a string")
+    mode = arguments.get("mode")
+    if mode is not None and not isinstance(mode, str):
+        raise _BadArgument("argument mode must be a string")
+    timeout = _clamp_number(arguments.get("timeout", 600), "timeout", 1, 86400, False)
+    simulator = _load("simulators")
+    name = "netlist-" + hashlib.sha1(netlist.encode("utf-8")).hexdigest()[:8]
+    extension = ".cir" if (backend or "ngspice") == "ngspice" else ".scs"
+    try:
+        result = simulator.run(name + extension, backend=backend, mode=mode,
+                               timeout=timeout, netlist_text=netlist)
+    except simulator.SimulatorError as exc:
+        return "simulation could not start: %s" % exc, True
+    if not isinstance(result, dict):
+        return "simulation returned a non-dict result: %r" % (result,), True
+    return _format_sim(result), not bool(result.get("ok"))
+
+
+def _format_sim(result):
+    """Compact, honest rendering: status first, then numbers, then causes."""
+    lines = [
+        "status: %s (ok=%s)" % (result.get("status"), result.get("ok")),
+        "backend: %s" % result.get("backend"),
+    ]
+    metadata = result.get("metadata") or {}
+    if metadata.get("target"):
+        lines.append("target: %s" % metadata["target"])
+    if metadata.get("mode"):
+        lines.append("mode: %s" % metadata["mode"])
+    data = result.get("data") or {}
+    if data:
+        summary = []
+        for key, value in data.items():
+            if isinstance(value, list):
+                summary.append("%s[%d]" % (key, len(value)))
+            else:
+                summary.append("%s=%s" % (key, value))
+        lines.append("data: " + ", ".join(summary))
+    else:
+        lines.append("data: (none parsed)")
+    for key in ("plots", "artifacts"):
+        if metadata.get(key):
+            lines.append("%s: %s" % (key, json.dumps(metadata[key], ensure_ascii=False)[:400]))
+    if metadata.get("work_dir"):
+        lines.append("work_dir: %s" % metadata["work_dir"])
+    timings = metadata.get("timings") or {}
+    if timings:
+        lines.append("timings: " + json.dumps(timings))
+    for error in result.get("errors") or []:
+        lines.append("error: %s" % error)
+    for warning in (result.get("warnings") or [])[:5]:
+        lines.append("warning: %s" % warning)
+    return "\n".join(lines)
+
+
 _TOOL_HANDLERS.update(
     {
         "pyaether_status": _tool_status,
         "pyaether_api_search": _tool_api_search,
         "pyaether_api_help": _tool_api_help,
         "pyaether_exec": _tool_exec,
+        "pyaether_sim_run": _tool_sim_run,
     }
 )
 

@@ -131,8 +131,42 @@ echo 'import pyAether; print(pyAether.__file__)' | ./bin/pyaether exec
 ./bin/pyaether api stats
 ./bin/pyaether api search emyInitDb --limit 10
 ./bin/pyaether api show pyAether.emyInitDb
+
+./bin/pyaether sim backends --probe            # which simulators are available
+./bin/pyaether sim run rc.cir --backend ngspice  # open-source SPICE
+./bin/pyaether sim run tb.scs --backend spectre --mode ax
 ./bin/pyaether version
 ```
+
+## Simulators
+
+Netlists are not tied to one simulator: the same file can be checked with
+open-source ngspice and signed off with Cadence Spectre/APS, and both come back
+through the same result contract (`ok` / `status` / `data` / `errors` /
+`metadata`). The simulator target is selected **independently** of the PyAether
+target, so ngspice can run on your laptop while PyAether lives in a container.
+
+| Backend | Kind | Modes |
+| --- | --- | --- |
+| `ngspice` | open source | analysis declared in the netlist |
+| `spectre` | commercial | `spectre`, `aps`, `x`, `cx`, `ax`, `mx`, `lx`, `vx` |
+| `custom` | any simulator | your own command template |
+
+```bash
+# open-source engines prefer this machine automatically when the binary is here;
+# pin it explicitly if you want to be sure:
+export PYAETHER_SIM_TARGET=local
+./bin/pyaether sim run rc.cir --backend ngspice --json
+
+# any other tool, including an in-house or vendor simulator
+export PYAETHER_SIM_CMD='Xyce -l {log} -r {raw}.raw {netlist}'
+./bin/pyaether sim run rc.cir --backend custom
+```
+
+`ok` is the execution contract: a non-empty `data` is never treated as proof of
+success, failures are classified (netlist read error / license error /
+convergence failure / missing file / crash), and the strict accessors refuse to
+invent numbers. See [docs/SIMULATORS.md](docs/SIMULATORS.md).
 
 Conventions: human-readable output is English, `--json` prints raw JSON. Exit
 code `0` for success, `1` for a runtime failure (daemon won't start, catalog
@@ -156,8 +190,8 @@ args = ["/absolute/path/to/pyaether-bridge/bin/pyaether-mcp"]
 ```
 
 Tools exposed: `pyaether_status`, `pyaether_api_search`, `pyaether_api_help`,
-`pyaether_exec`. Writing to a real `config.toml` changes your user
-configuration, so this repository does not modify it for you.
+`pyaether_exec`, `pyaether_sim_run`. Writing to a real `config.toml` changes
+your user configuration, so this repository does not modify it for you.
 
 ## Offline API catalog
 
@@ -219,6 +253,15 @@ prefers the documented entry with the full typed signature.
 | `PYAETHER_CATALOG_DB` | Catalog sqlite path (default `data/catalog.sqlite` in the repo) |
 | `PYAETHER_DOCS_DIR` | Default docs directory for `api build` |
 | `PYAETHER_BRIDGE_NO_AUTOSTART` | Set to `1` to forbid auto-starting the daemon |
+| `PYAETHER_SIM_TARGET` | Where simulators run: `docker` / `ssh` / `local` (default: the bridge transport) |
+| `PYAETHER_SIM_BACKEND` | Default simulator backend (default `ngspice`) |
+| `PYAETHER_SIM_WORKDIR` | Simulator work directory on the target (default `/tmp/pyaether-sim`) |
+| `PYAETHER_SIM_TIMEOUT` | Default simulation timeout in seconds (default 600) |
+| `PYAETHER_SIM_SSH_HOST` / `_PORT` / `_OPTS` | Simulator SSH target when it differs from the bridge target |
+| `PYAETHER_SIM_CONTAINER` | Simulator container when it differs from the bridge container |
+| `PYAETHER_SIM_CMD` | Command template for the `custom` backend (`{netlist}` `{workdir}` `{log}` `{raw}` `{mode}`) |
+| `PYAETHER_NGSPICE_BIN` | ngspice binary name or path (default `ngspice`) |
+| `PYAETHER_SPECTRE_BIN` | Spectre binary name or path (default `spectre`) |
 
 Machine-specific settings can also live in
 `$PYAETHER_BRIDGE_HOME/config.json` (default
@@ -280,14 +323,16 @@ repository:
 
 ```bash
 bash tests/smoke_cli.sh                  # CLI smoke test, needs no Docker/daemon
-python3 tests/mcp_probe.py               # MCP protocol + 4 tools, 14 checks
+python3 tests/mcp_probe.py               # MCP protocol + every tool
 python3 tests/transport_probe.py         # transport layer: local + fake-ssh stub
 PYAETHER_TEST_DOCKER=1 python3 tests/transport_probe.py   # also exercise a real container
+python3 tests/simulator_probe.py         # real ngspice run + result contract
 ```
 
 ## Documentation
 
 - [docs/INSTALL.md](docs/INSTALL.md) — target preparation, self-checks, troubleshooting
+- [docs/SIMULATORS.md](docs/SIMULATORS.md) — simulator backends, result contract, adding a new one
 - [ARCHITECTURE.md](ARCHITECTURE.md) — module layout, internal interfaces, wire format
 - [README.ja.md](README.ja.md) — 日本語版
 - [README.zh-TW.md](README.zh-TW.md) — 繁體中文版

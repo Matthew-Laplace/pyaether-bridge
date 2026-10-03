@@ -8,7 +8,7 @@ Usage:
 The probe builds a mini catalog in a temp directory using the schema from
 ARCHITECTURE.md, isolates the PYAETHER_* environment, then starts
 pyaether_bridge/mcp_server.py as a subprocess and checks JSON-RPC/MCP
-behaviour plus all four tools. When catalog.py / runtime.py are missing or a
+behaviour plus every tool. When catalog.py / runtime.py are missing or a
 fully offline run is wanted, a minimal stub is injected via sitecustomize
 (the server itself contains no stub code).
 
@@ -209,6 +209,7 @@ EXPECTED_TOOLS = {
     "pyaether_api_search": ["query"],
     "pyaether_api_help": ["symbol"],
     "pyaether_exec": ["code"],
+    "pyaether_sim_run": ["netlist"],
 }
 
 
@@ -574,7 +575,8 @@ def main():
 
         probe.step("initialize echoes protocolVersion / serverInfo / capabilities.tools", check_initialize)
         probe.step("notifications/initialized is not answered, ping still works", check_initialized_notification)
-        probe.step("tools/list returns 4 tools with a valid schema", check_tools_list)
+        probe.step("tools/list returns every expected tool with a valid schema",
+                   check_tools_list)
         probe.step("tools/call pyaether_api_search hits the mini catalog", check_api_search)
         probe.step("tools/call pyaether_api_search supports kind filtering", check_api_search_kind_filter)
         probe.step("tools/call pyaether_api_help hits and returns a signature", check_api_help)

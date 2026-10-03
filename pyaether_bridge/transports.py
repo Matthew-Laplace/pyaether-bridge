@@ -2,13 +2,15 @@
 """Execution-target transport layer: abstracts "where PyAether lives" into the
 docker / ssh / local variants.
 
-The daemon relies on only five actions from this module:
+The daemon relies on only six actions from this module:
 
     describe()                dict used for status display
     probe()                   target reachability and interpreter information
     write_file(path, data)    put session_bridge.py onto the target
     open_session(inner)       start a persistent stdio session (NDJSON)
     fetch_file(path, local)   fetch a file back from the target (used by `api sync-live`)
+    run_command(command)      run one shell command on the target and capture its
+                              output (used by `sim run` for external simulators)
 
 The three deployments map to real-world setups:
 
@@ -30,10 +32,12 @@ import pathlib
 import shlex
 import shutil
 import subprocess
+import time
 
 from . import config
 
 RUN_TIMEOUT = 60.0
+COMMAND_TIMEOUT = 600.0
 
 
 class TransportError(RuntimeError):
@@ -54,6 +58,57 @@ def _run(command, data=None, timeout=RUN_TIMEOUT):
 
 def _text(raw):
     return (raw or b"").decode("utf-8", "replace").strip()
+
+
+def _decode(raw):
+    return (raw or b"").decode("utf-8", "replace")
+
+
+def _command_result(command, returncode, stdout, stderr, elapsed, timed_out=False):
+    return {
+        "command": command,
+        "returncode": returncode,
+        "stdout": _decode(stdout),
+        "stderr": _decode(stderr),
+        "elapsed_s": round(elapsed, 3),
+        "timed_out": bool(timed_out),
+    }
+
+
+def _run_capture(command, cwd=None, env=None, timeout=COMMAND_TIMEOUT):
+    """Run a command and keep its output, even when it times out.
+
+    Unlike :func:`_run` this never raises on a non-zero exit or a timeout: a
+    simulator that fails is a result to report, not a transport error.
+    """
+    started = time.time()
+    try:
+        proc = subprocess.run(
+            command, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout,
+        )
+    except FileNotFoundError as exc:
+        raise TransportError("command not found %r: %s" % (command[0], exc))
+    except subprocess.TimeoutExpired as exc:
+        return _command_result(
+            " ".join(command), None, exc.stdout, exc.stderr,
+            time.time() - started, timed_out=True,
+        )
+    return _command_result(
+        " ".join(command), proc.returncode, proc.stdout, proc.stderr,
+        time.time() - started,
+    )
+
+
+def run_on_host(command, cwd=None, env=None, timeout=COMMAND_TIMEOUT):
+    """Run one command on the machine that hosts the daemon (never on the target).
+
+    Used by `sim run --side host` for open-source tools, independently of the
+    docker/ssh/local transport that talks to PyAether.
+    """
+    merged = dict(os.environ)
+    merged.update({key: str(value) for key, value in (env or {}).items()})
+    return _run_capture(["bash", "-lc", command], cwd=cwd, env=merged, timeout=timeout)
 
 
 class Transport:
@@ -89,10 +144,37 @@ class Transport:
     def fetch_file(self, path, local_path):
         raise NotImplementedError
 
+    def run_command(self, command, cwd=None, env=None, timeout=COMMAND_TIMEOUT):
+        raise NotImplementedError
+
     # ---- shared ---------------------------------------------------------
     def session_command(self):
         """The command that is actually executed: login shell + Aether's bundled interpreter."""
         return "exec %s %s" % (self.python, shlex.quote(self.script_path))
+
+    def run(self, command, timeout=RUN_TIMEOUT, env=None):
+        """Run one shell command on the target -> {"rc", "stdout", "stderr"}.
+
+        The simulator layer stages a netlist with ``write_file``, invokes the
+        simulator here, and pulls artifacts back with ``fetch_file``; so
+        simulators reuse whatever target the bridge already talks to
+        (container / SSH host / this machine).
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def _wrap_env(command, env):
+        """Prefix ``VAR=value`` assignments so the command sees them."""
+        if not env:
+            return command
+        prefix = " ".join(
+            "%s=%s" % (key, shlex.quote(str(value))) for key, value in sorted(env.items())
+        )
+        return "%s %s" % (prefix, command)
+
+    @staticmethod
+    def _split(proc):
+        return {"rc": proc.returncode, "stdout": _text(proc.stdout), "stderr": _text(proc.stderr)}
 
 
 class DockerTransport(Transport):
@@ -169,6 +251,18 @@ class DockerTransport(Transport):
                     timeout=120.0)
         if proc.returncode != 0:
             raise TransportError("docker cp failed: %s" % _text(proc.stderr))
+
+    def run_command(self, command, cwd=None, env=None, timeout=COMMAND_TIMEOUT):
+        argv = ["docker", "exec", "-i"]
+        if cwd:
+            argv += ["-w", cwd]
+        for key, value in sorted((env or {}).items()):
+            argv += ["-e", "%s=%s" % (key, value)]
+        argv += [self.container, "bash", "-lc", command]
+        return _run_capture(argv, timeout=timeout)
+
+    def run(self, command, timeout=RUN_TIMEOUT, env=None):
+        return self._split(self._login(self._wrap_env(command, env), timeout=timeout))
 
     @staticmethod
     def _popen(command):
@@ -257,6 +351,20 @@ class SSHTransport(Transport):
         with open(local_path, "wb") as handle:
             handle.write(proc.stdout)
 
+    def run_command(self, command, cwd=None, env=None, timeout=COMMAND_TIMEOUT):
+        inner = command
+        if env:
+            inner = "export %s; %s" % (
+                " ".join("%s=%s" % (key, shlex.quote(str(value)))
+                         for key, value in sorted(env.items())), inner)
+        if cwd:
+            inner = "cd %s && %s" % (shlex.quote(cwd), inner)
+        return _run_capture(self._base() + ["bash", "-lc", shlex.quote(inner)], timeout=timeout)
+
+    def run(self, command, timeout=RUN_TIMEOUT, env=None):
+        proc = self._remote(self._wrap_env(command, env), timeout=timeout)
+        return self._split(proc)
+
 
 class LocalTransport(Transport):
     kind = "local"
@@ -289,6 +397,18 @@ class LocalTransport(Transport):
 
     def fetch_file(self, path, local_path):
         shutil.copyfile(path, local_path)
+
+    def run_command(self, command, cwd=None, env=None, timeout=COMMAND_TIMEOUT):
+        return run_on_host(command, cwd=cwd, env=env, timeout=timeout)
+
+    def run(self, command, timeout=RUN_TIMEOUT, env=None):
+        command = self._wrap_env(command, env)
+        try:
+            proc = subprocess.run(["bash", "-lc", command],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise TransportError("command timed out after %.0fs: %s" % (timeout, command))
+        return self._split(proc)
 
 
 def build(kind=None):

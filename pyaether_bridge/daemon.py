@@ -14,6 +14,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import select
 import shlex
 import signal
@@ -30,6 +31,11 @@ from . import config, transports
 DEFAULT_START_TIMEOUT = 240.0
 PROTOCOL_SKEW = 30.0  # daemon waits this much longer than the container-side exec timeout
 DOCKER_TIMEOUT = 20.0
+PROBE_TIMEOUT = 20.0
+MAX_FETCH_FILES = 20
+MAX_FETCH_BYTES = 32 * 1024 * 1024
+FETCH_SUFFIXES = (".raw", ".csv", ".measure", ".mt0", ".log", ".psf", ".txt")
+LOG_TAIL_CHARS = 4000
 
 
 class BridgeError(RuntimeError):
@@ -114,6 +120,64 @@ def _read_script():
         _script_cache["stat"] = key
         _script_cache["bytes"] = source.read_bytes()
     return _script_cache["bytes"]
+
+
+def new_run_id(engine_name):
+    """Run identifier: sortable timestamp + engine + 4 random hex characters."""
+    return "%s-%s-%s" % (time.strftime("%Y%m%d-%H%M%S"), engine_name, os.urandom(2).hex())
+
+
+def netlist_filename(name, dialect):
+    """Sanitise the netlist file name and give it the dialect's usual suffix."""
+    suffix = {"spectre": ".scs", "empyrean": ".scs"}.get(dialect, ".cir")
+    base = os.path.basename(name or "").strip() or "design"
+    base = re.sub(r"[^A-Za-z0-9_.+-]", "_", base)
+    if base.endswith(".scs") or base.endswith(".cir") or base.endswith(".sp") or base.endswith(".spi"):
+        return base
+    return base + suffix
+
+
+def parse_find_listing(text):
+    """Parse ``find . -maxdepth N -type f -printf '%p\\t%s\\n'`` output."""
+    entries = []
+    for line in (text or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) != 2:
+            continue
+        name = parts[0].strip().lstrip("./")
+        if not name:
+            continue
+        try:
+            size = int(parts[1])
+        except ValueError:
+            size = None
+        entries.append({"name": name, "size": size})
+    return entries
+
+
+def normalize_design(value):
+    """Accept ``"lib/cell/view"`` or a 3-item list; return a tuple or None."""
+    if isinstance(value, (list, tuple)) and len(value) == 3:
+        parts = [str(item).strip() for item in value]
+        return tuple(parts) if all(parts) else None
+    if isinstance(value, str) and value.count("/") == 2:
+        parts = [item.strip() for item in value.split("/")]
+        return tuple(parts) if all(parts) else None
+    return None
+
+
+def _fetch_wanted(entry, log_name, raw_name, fetch_results):
+    """Decide whether one file of the run directory should be copied back."""
+    name = entry["name"]
+    if "/" in name:  # keep it to depth 1; result directories stay on the target
+        return False
+    if name == log_name:
+        return True
+    if not fetch_results:
+        return False
+    if entry.get("size") and entry["size"] > MAX_FETCH_BYTES:
+        return False
+    return name == raw_name or name.lower().endswith(FETCH_SUFFIXES)
 
 
 class Session:

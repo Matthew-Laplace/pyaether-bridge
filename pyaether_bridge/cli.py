@@ -71,6 +71,10 @@ def _config():
     return _load("config")
 
 
+def _simulators():
+    return _load("simulators")
+
+
 # --------------------------------------------------------------------------- #
 # output helpers
 # --------------------------------------------------------------------------- #
@@ -408,6 +412,93 @@ def cmd_api_show(args):
 
 
 def cmd_daemon(args):
+
+    return _daemon_action(args)
+
+
+# --------------------------------------------------------------------------- #
+# simulators
+# --------------------------------------------------------------------------- #
+def _sim_summary(result):
+    """Human-readable rendering of one simulation result."""
+    print("status : %s (ok=%s)" % (result.get("status"), result.get("ok")))
+    print("backend: %s" % result.get("backend"))
+    metadata = result.get("metadata") or {}
+    for key in ("target", "mode", "work_dir", "command"):
+        if metadata.get(key):
+            print("%-7s: %s" % (key, metadata[key]))
+    data = result.get("data") or {}
+    if data:
+        parts = []
+        for key, value in data.items():
+            parts.append("%s[%d]" % (key, len(value)) if isinstance(value, list)
+                         else "%s=%s" % (key, value))
+        print("data   : %s" % ", ".join(parts))
+    else:
+        print("data   : (none parsed)")
+    for plot in metadata.get("plots") or []:
+        print("plot   : %s (points=%s, variables=%s)"
+              % (plot.get("name"), plot.get("points"), ", ".join(plot.get("variables") or [])))
+    if metadata.get("artifacts"):
+        print("files  : %s" % ", ".join(metadata["artifacts"]))
+    timings = metadata.get("timings") or {}
+    if timings:
+        print("timings: %s" % ", ".join("%s=%s" % item for item in timings.items()))
+    for error in result.get("errors") or []:
+        print("error  : %s" % error, file=sys.stderr)
+    for warning in (result.get("warnings") or [])[:5]:
+        print("warning: %s" % warning, file=sys.stderr)
+
+
+def cmd_sim_backends(args):
+    simulators = _simulators()
+    info = {"backends": simulators.backends()}
+    if args.probe:
+        probes = {}
+        for name in info["backends"]:
+            try:
+                probes[name] = simulators.probe(name)
+            except Exception as exc:  # a broken target must not hide the table
+                probes[name] = {"backend": name, "available": False, "detail": str(exc),
+                                "target": "", "version": ""}
+        info["probe"] = probes
+
+    def human():
+        for name, meta in info["backends"].items():
+            print("%s  [%s]" % (name, meta.get("kind")))
+            print("  binary : %s (env %s)"
+                  % (meta.get("default_binary") or "(template)",
+                     meta.get("binary_config")))
+            if meta.get("modes"):
+                print("  modes  : %s" % ", ".join(meta["modes"]))
+            print("  notes  : %s" % meta.get("notes"))
+            probe = (info.get("probe") or {}).get(name)
+            if probe:
+                state = "available" if probe.get("available") else "unavailable"
+                detail = probe.get("version") or probe.get("detail") or ""
+                print("  probe  : %s on %s %s"
+                      % (state, probe.get("target") or "?", ("(%s)" % detail) if detail else ""))
+
+    return _emit(info, getattr(args, "json", False), human)
+
+
+def cmd_sim_run(args):
+    simulators = _simulators()
+    if not os.path.isfile(args.netlist):
+        raise CliError("netlist not found: %s" % args.netlist,
+                       hint="pass the path of a SPICE netlist file.")
+    try:
+        result = simulators.run(args.netlist, backend=args.backend, mode=args.mode,
+                                timeout=args.timeout, includes=args.include,
+                                run_id=args.run_id)
+    except simulators.SimulatorError as exc:
+        raise CliError("simulation could not start: %s" % exc,
+                       hint="check `%s sim backends --probe` for what is installed." % PROG)
+    code = 0 if result.get("ok") else 1
+    return _emit(result, getattr(args, "json", False), lambda: _sim_summary(result)) or code
+
+
+def _daemon_action(args):
     runtime = _runtime()
     action = args.action
     try:
@@ -512,6 +603,27 @@ def build_parser():
     p_daemon.add_argument("--json", action="store_true", help="print raw JSON")
     p_daemon.set_defaults(func=cmd_daemon)
 
+    p_sim = sub.add_parser("sim", help="run SPICE netlists on a switchable simulator")
+    sim_sub = p_sim.add_subparsers(dest="sim_command", metavar="<operation>")
+
+    p_sim_backends = sim_sub.add_parser("backends", help="list simulator backends")
+    p_sim_backends.add_argument("--probe", action="store_true",
+                                help="also check the target for each backend binary")
+    p_sim_backends.add_argument("--json", action="store_true", help="print raw JSON")
+    p_sim_backends.set_defaults(func=cmd_sim_backends)
+
+    p_sim_run = sim_sub.add_parser("run", help="run one netlist and parse the results")
+    p_sim_run.add_argument("netlist", help="path of the netlist to run")
+    p_sim_run.add_argument("--backend", choices=["ngspice", "spectre", "custom"],
+                           help="simulator backend (default PYAETHER_SIM_BACKEND)")
+    p_sim_run.add_argument("--mode", help="Spectre engine/preset: aps, ax, mx, ...")
+    p_sim_run.add_argument("--timeout", type=float, help="timeout in seconds (default 600)")
+    p_sim_run.add_argument("--include", action="append", metavar="FILE",
+                           help="extra file (model/Verilog-A include) staged next to the netlist; repeatable")
+    p_sim_run.add_argument("--run-id", help="suffix for the run directory name")
+    p_sim_run.add_argument("--json", action="store_true", help="print raw JSON")
+    p_sim_run.set_defaults(func=cmd_sim_run)
+
     p_version = sub.add_parser("version", help="show the version")
     p_version.add_argument("--json", action="store_true", help="print raw JSON")
     p_version.set_defaults(func=cmd_version)
@@ -525,11 +637,12 @@ def main(argv=None):
     if not getattr(args, "command", None):
         parser.print_help()
         return 0
-    if args.command == "api" and not getattr(args, "api_command", None):
+    if args.command in ("api", "sim") and not getattr(
+            args, "%s_command" % args.command, None):
         for action in parser._subparsers._group_actions:  # pragma: no cover - help text only
             choices = getattr(action, "choices", {})
-            if "api" in choices:
-                choices["api"].print_help()
+            if args.command in choices:
+                choices[args.command].print_help()
                 break
         return 0
     try:

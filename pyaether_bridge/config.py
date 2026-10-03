@@ -21,10 +21,20 @@ Environment variables
     PYAETHER_DOCS_DIR        Sphinx docs/html directory used by `api build`
     PYAETHER_BRIDGE_NO_AUTOSTART  set to 1 to forbid auto-starting the daemon
 
+    PYAETHER_SIM_TARGET      where simulators run: docker / ssh / local
+                             (default: the bridge transport)
+    PYAETHER_SIM_BACKEND     default simulator backend (default ngspice)
+    PYAETHER_SIM_WORKDIR     run directory root on the simulator target
+    PYAETHER_SIM_TIMEOUT     default simulation timeout in seconds (default 600)
+    PYAETHER_NGSPICE_BIN     ngspice binary name or path
+    PYAETHER_SPECTRE_BIN     Spectre binary name or path
+    PYAETHER_SIM_CMD         command template for the "custom" backend
+
 User config file (optional): <DATA_DIR>/config.json, same keys in snake_case
     {"transport": "ssh", "ssh_host": "user@server", "container": "...",
      "python": "...", "remote_dir": "...", "license_server": "...",
-     "docs_dir": "...", "catalog_db": "..."}
+     "docs_dir": "...", "catalog_db": "...",
+     "sim_target": "local", "sim_backend": "ngspice", "sim_timeout": 600}
 """
 
 from __future__ import annotations
@@ -83,6 +93,24 @@ SESSION_SCRIPT_SRC = PACKAGE_DIR / "session_bridge.py"
 # Empty means "do not override the target's own LM_LICENSE_FILE" (most
 # deployments already set it).
 LICENSE_SERVER = setting("PYAETHER_LICENSE_SERVER", "license_server")
+
+# --- simulators -----------------------------------------------------------
+# A simulator does not have to run where PyAether runs (ngspice on a laptop,
+# Spectre on a licensed server), so the simulator target resolves separately.
+# An empty SIM_TARGET means "use the bridge transport".
+SIM_TARGET = setting("PYAETHER_SIM_TARGET", "sim_target", "")
+SIM_BACKEND = setting("PYAETHER_SIM_BACKEND", "sim_backend", "ngspice")
+SIM_WORKDIR = setting("PYAETHER_SIM_WORKDIR", "sim_workdir", "/tmp/pyaether-sim")
+SIM_TIMEOUT = setting("PYAETHER_SIM_TIMEOUT", "sim_timeout", "600")
+SIM_SSH_HOST = setting("PYAETHER_SIM_SSH_HOST", "sim_ssh_host", "")
+SIM_SSH_PORT = setting("PYAETHER_SIM_SSH_PORT", "sim_ssh_port", "")
+SIM_SSH_OPTS = setting("PYAETHER_SIM_SSH_OPTS", "sim_ssh_opts", "")
+SIM_CONTAINER = setting("PYAETHER_SIM_CONTAINER", "sim_container", "")
+# Command template for the "custom" backend; empty means "not configured".
+SIM_CMD = setting("PYAETHER_SIM_CMD", "sim_cmd", "")
+NGSPICE_BIN = setting("PYAETHER_NGSPICE_BIN", "ngspice_bin", "ngspice")
+SPECTRE_BIN = setting("PYAETHER_SPECTRE_BIN", "spectre_bin", "spectre")
+SPECTRE_MODE = setting("PYAETHER_SPECTRE_MODE", "spectre_mode", "ax")
 
 DAEMON_SOCK = _env_path("PYAETHER_DAEMON_SOCK") or (DATA_DIR / "daemon.sock")
 DAEMON_PID = DATA_DIR / "daemon.pid"

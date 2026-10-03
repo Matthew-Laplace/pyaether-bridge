@@ -294,3 +294,5 @@ def status(*, autostart=False):
         "namespace_keys": response.get("namespace_keys", []),
         "last_error": response.get("last_error"),
     }
+
+

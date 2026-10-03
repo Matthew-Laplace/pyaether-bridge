@@ -10,6 +10,7 @@ big picture see the [README](README.md#architecture).
 <ROOT>/pyaether_bridge/__init__.py         # version string
 <ROOT>/pyaether_bridge/config.py           # configuration resolution (env var / user config file / default)
 <ROOT>/pyaether_bridge/transports.py       # transports: docker / ssh / local
+<ROOT>/pyaether_bridge/simulators.py       # simulator backends + result contract
 <ROOT>/pyaether_bridge/catalog.py          # offline API catalog (sqlite + FTS5)
 <ROOT>/pyaether_bridge/runtime.py          # host-side client (unix socket -> daemon)
 <ROOT>/pyaether_bridge/daemon.py           # host daemon (serializes target requests)
@@ -21,6 +22,7 @@ big picture see the [README](README.md#architecture).
 <ROOT>/tests/smoke_cli.sh                  # CLI smoke test (needs no Docker)
 <ROOT>/tests/mcp_probe.py                  # MCP protocol and tool probe
 <ROOT>/tests/transport_probe.py            # transport probe (local + fake ssh stub + optional docker)
+<ROOT>/tests/simulator_probe.py            # simulator probe (real ngspice + contract checks)
 <ROOT>/data/catalog.sqlite                 # local build artifact, not in git
 ```
 
@@ -110,6 +112,60 @@ CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
 
 ## runtime.py
 
+## simulators.py
+
+Simulator-agnostic netlist execution. It reuses the transport layer, so a
+simulator can run wherever a transport can reach -- including a different
+machine than PyAether (`PYAETHER_SIM_TARGET`).
+
+```python
+def backends() -> dict                     # static description of every backend
+def probe(backend, *, transport=None)      # is the binary there, and which version
+def build_command(backend, *, netlist, workdir, log, raw, mode=None, args=None)
+    # -> (shell command, extra environment); validates the mode before running
+def resolve_target(backend=None) -> (kind, reason)
+def transport_for_simulator(backend=None)  # PYAETHER_SIM_TARGET, else per-backend rule
+def run(netlist, *, backend=None, transport=None, workdir=None, timeout=None,
+        mode=None, args=None, includes=None, netlist_text=None, run_id=None) -> dict
+def parse_ascii_raw(text) -> list[dict]    # SPICE ASCII rawfile -> plots
+def parse_psf_ascii(text) -> dict          # PSF-ASCII scalar/vector VALUE records
+def scalar(data, key) / vector(data, key)  # strict accessors, raise on bad input
+```
+
+`run()` returns `{"ok", "status", "backend", "data", "errors", "warnings",
+"metadata"}` where `status` is `SUCCESS`, `PARTIAL` (the tool exited cleanly but
+nothing was parseable) or `FAILURE`, and `metadata` carries the command, work
+directory, artifact list, parsed plot headers and per-phase timings.
+
+Layout of one run -- staging, execution and parsing are separate phases so a
+slow remote copy is visible in `metadata["timings"]`:
+
+```
+<SIM_WORKDIR>/run-<backend>-<run_id>/
+    <netlist>            staged (copied or supplied as text)
+    <includes...>        staged next to the netlist
+    sim.log              simulator log (ngspice -o, Spectre +log)
+    raw.out or raw/      waveform data (ASCII rawfile, or PSF-ASCII)
+```
+
+Backends:
+
+| Backend | Command shape |
+| --- | --- |
+| `ngspice` | `ngspice -b -o <log> -r <raw> <netlist>` with `SPICE_ASCIIRAWFILE=1` so results are text |
+| `spectre` | `spectre -64 <netlist> +escchars +log <log> -format psfascii -raw <raw> <mode flags> +lqtimeout 900 -maxw 5 -maxn 5 +logstatus` |
+| `custom` | `PYAETHER_SIM_CMD` with `{netlist}` `{workdir}` `{log}` `{raw}` `{mode}` substituted |
+
+Spectre mode flags match `Arcadia-1/virtuoso-bridge-lite` (`+aps`, `+x`,
+`+preset=cx|ax|mx|lx|vx` with `+mt`) so results from either bridge are
+comparable. Details and usage: [docs/SIMULATORS.md](docs/SIMULATORS.md).
+
+Target resolution (`resolve_target`) when `PYAETHER_SIM_TARGET` is unset: an
+open-source backend runs on **this machine** if its binary is installed here,
+because it needs no licence and is not part of the EDA installation (the Aether
+container typically has no ngspice); `spectre` and `custom` follow the bridge
+target. The applied rule is reported as `metadata.target_reason`.
+
 ```python
 def request(method, params=None, *, timeout=30.0, autostart=True) -> dict
 def exec_code(code, *, timeout=120.0, autostart=True) -> dict
@@ -176,11 +232,15 @@ pyaether api search QUERY [--limit N] [--kind K] [--db DB] [--json]
 pyaether api show SYMBOL [--max-chars N] [--db DB] [--json]
 pyaether api sync-live [--db DB] [--timeout S] [--json]
 pyaether daemon [start|stop|status|restart] [--json]
+pyaether sim backends [--probe] [--json]
+pyaether sim run NETLIST [--backend ngspice|spectre|custom] [--mode MODE]
+                        [--timeout S] [--include FILE] [--run-id ID] [--json]
 pyaether version
 ```
 
 Exit codes: `0` success; `1` runtime failure (exec raised, catalog missing, ...);
 `2` usage error. Human-readable output is English; `--json` prints raw JSON.
+`sim run` exits `1` whenever the simulation result is not `ok`.
 
 ## MCP server
 
@@ -198,3 +258,4 @@ with `{"content": [...], "isError": true}` instead of a protocol error.
 | `pyaether_api_search` | `{query: str(required), limit?: int=20, kind?: str}` |
 | `pyaether_api_help` | `{symbol: str(required), max_chars?: int=4000}` |
 | `pyaether_exec` | `{code: str(required), timeout?: number=120}` |
+| `pyaether_sim_run` | `{netlist: str(required), backend?: "ngspice"|"spectre"|"custom", mode?: str, timeout?: number=600}` |
