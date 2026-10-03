@@ -247,6 +247,13 @@ scp -r "aether@lab-server:$DOCS" ./data/docs
   伺服器的宿主必須是 macOS 或 Linux；原生 Windows 不支援。
 - **僅存在於執行期的符號簽章較弱。** `runtime` 類條目來自對 SWIG 物件做 `inspect`，
   經常只顯示 `(*args, **kwargs)`。帶完整型別的簽章在文件條目裡，搜尋時會優先給出。
+- **設計上會執行任意程式碼。** `pyaether exec` 與 MCP 的 `pyaether_exec` 工具會以
+  你自己的權限在目標 session 中執行任意 Python —— 這正是本工具的用途。daemon 的
+  unix socket 權限為 `0600`，只有你自己的使用者能連上；但請不要把這個 bridge
+  交給不受信任的呼叫方。
+- **版本與目錄佈局假設。** 目標必須提供小寫模組名 `pyAether`，且 `api build`
+  預期文件位於 `tools/pyaether/docs/html`。開發與驗證使用 Aether 2026.03，
+  其他版本未經測試。
 
 ## 測試
 

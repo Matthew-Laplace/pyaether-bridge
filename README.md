@@ -318,6 +318,14 @@ repository:
   `inspect` on SWIG objects and often read `(*args, **kwargs)`. The fully typed
   signatures live in the documentation entries, which is why search ranks those
   first.
+- **Arbitrary code execution, by design.** `pyaether exec` and the MCP
+  `pyaether_exec` tool run arbitrary Python in the target session with your own
+  privileges — that is the point of the tool. The daemon's unix socket is mode
+  `0600`, so only your user can reach it, but do not hand this bridge to
+  untrusted callers.
+- **Version and layout assumptions.** The target must expose the lowercase module
+  `pyAether`, and `api build` expects the docs under `tools/pyaether/docs/html`.
+  Development and testing used Aether 2026.03; other releases are untested.
 
 ## Tests
 
