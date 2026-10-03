@@ -31,7 +31,9 @@ import os
 import pathlib
 import shlex
 import shutil
+import signal
 import subprocess
+import time
 import time
 
 from . import config
@@ -44,6 +46,18 @@ class TransportError(RuntimeError):
     """Transport failure (missing command, unreachable target, failed deploy, ...)."""
 
 
+class TransportTimeout(TransportError):
+    """The command did not finish in time.
+
+    Kept separate from other transport errors because a timeout is the one case
+    where the target may still be *running* the command: killing the local
+    client (docker exec / ssh) does not kill the process on the other side, so
+    the caller has to ask for a cleanup by marker.
+    """
+
+    timed_out = True
+
+
 def _run(command, data=None, timeout=RUN_TIMEOUT):
     try:
         return subprocess.run(
@@ -53,7 +67,7 @@ def _run(command, data=None, timeout=RUN_TIMEOUT):
     except FileNotFoundError as exc:
         raise TransportError("command not found %r: %s" % (command[0], exc))
     except subprocess.TimeoutExpired:
-        raise TransportError("%s timed out (%.0fs)" % (command[0], timeout))
+        raise TransportTimeout("%s timed out (%.0fs)" % (command[0], timeout))
 
 
 def _text(raw):
@@ -176,6 +190,61 @@ class Transport:
     def _split(proc):
         return {"rc": proc.returncode, "stdout": _text(proc.stdout), "stderr": _text(proc.stderr)}
 
+    @staticmethod
+    def _pidfile(run_dir):
+        return os.path.join(run_dir, "sim.pid")
+
+    @classmethod
+    def _tracked_command(cls, command, run_dir):
+        """Run ``command`` in its own process group and record its PID.
+
+        ``setsid`` detaches the command into a new session, so the whole tree
+        (a simulator plus whatever it forks) shares one process group. Killing
+        the local client is not enough on its own: the process on the other side
+        keeps running, and killing only the wrapper leaves the real worker alive
+        (measured -- `pkill -f` on the wrapper left `sleep` running). With a
+        process group we can kill the tree in one shot.
+
+        ``setsid`` is Linux-only (macOS has no such binary), so the snippet
+        falls back to a plain background job. That is still correct for the
+        local transport, which already starts the whole thing in a new session;
+        both paths were measured to propagate the exit status unchanged.
+        """
+        pidfile = shlex.quote(cls._pidfile(run_dir))
+        inner = shlex.quote(command)
+        return (
+            "if command -v setsid >/dev/null 2>&1; then setsid sh -c {inner} &"
+            " else sh -c {inner} & fi; _p=$!; echo $_p > {pidfile}; wait $_p"
+        ).format(inner=inner, pidfile=pidfile)
+
+    @staticmethod
+    def _kill_group_script(run_dir):
+        """Shell snippet: kill the recorded process group, then sweep by path."""
+        pidfile = shlex.quote(Transport._pidfile(run_dir))
+        return (
+            "p=$(cat {pidfile} 2>/dev/null);"
+            " if [ -n \"$p\" ]; then"
+            " kill -TERM -\"$p\" 2>/dev/null || true;"
+            " sleep 1;"
+            " kill -KILL -\"$p\" 2>/dev/null || true;"
+            " fi;"
+            " pkill -f {run_dir} >/dev/null 2>&1 || true;"
+            " rm -f {pidfile};"
+        ).format(pidfile=pidfile, run_dir=shlex.quote(run_dir))
+
+    @staticmethod
+    def _leftover_check_script(run_dir):
+        return "ps -eo pid,args 2>/dev/null | grep -F %s | grep -v grep || true" % (
+            shlex.quote(run_dir))
+
+    def cleanup(self, run_dir):
+        """Best-effort kill of everything the run started on the target.
+
+        Returns a short note describing what was actually observed afterwards;
+        never raises, because this runs on the failure path.
+        """
+        raise NotImplementedError
+
 
 class DockerTransport(Transport):
     kind = "docker"
@@ -261,8 +330,27 @@ class DockerTransport(Transport):
         argv += [self.container, "bash", "-lc", command]
         return _run_capture(argv, timeout=timeout)
 
-    def run(self, command, timeout=RUN_TIMEOUT, env=None):
-        return self._split(self._login(self._wrap_env(command, env), timeout=timeout))
+    def run(self, command, timeout=RUN_TIMEOUT, env=None, run_dir=None):
+        command = self._wrap_env(command, env)
+        if run_dir:
+            command = self._tracked_command(command, run_dir)
+        return self._split(self._login(command, timeout=timeout))
+
+    def cleanup(self, run_dir):
+        # Killing the host-side `docker exec` leaves the container process
+        # running (measured: `sleep 45` survived a 3 s timeout), so the kill has
+        # to happen inside the container, against the recorded process group.
+        try:
+            self._exec(self._kill_group_script(run_dir), timeout=60.0)
+            leftovers = self._exec(self._leftover_check_script(run_dir), timeout=30.0)
+        except TransportError as exc:
+            return "cleanup failed: %s" % exc
+        remaining = _text(leftovers.stdout).strip()
+        if remaining:
+            return ("killed process group, but processes matching %s remain in %s: %s"
+                    % (run_dir, self.container, remaining.replace("\n", "; ")[:200]))
+        return "killed process group for %s in container %s (no leftovers)" % (
+            run_dir, self.container)
 
     @staticmethod
     def _popen(command):
@@ -361,9 +449,25 @@ class SSHTransport(Transport):
             inner = "cd %s && %s" % (shlex.quote(cwd), inner)
         return _run_capture(self._base() + ["bash", "-lc", shlex.quote(inner)], timeout=timeout)
 
-    def run(self, command, timeout=RUN_TIMEOUT, env=None):
-        proc = self._remote(self._wrap_env(command, env), timeout=timeout)
-        return self._split(proc)
+    def run(self, command, timeout=RUN_TIMEOUT, env=None, run_dir=None):
+        command = self._wrap_env(command, env)
+        if run_dir:
+            command = self._tracked_command(command, run_dir)
+        return self._split(self._remote(command, timeout=timeout))
+
+    def cleanup(self, run_dir):
+        # Same reasoning as docker: the remote process outlives the ssh client,
+        # so kill the recorded process group on the far side.
+        try:
+            self._remote(self._kill_group_script(run_dir), timeout=60.0)
+            leftovers = self._remote(self._leftover_check_script(run_dir), timeout=30.0)
+        except TransportError as exc:
+            return "cleanup failed: %s" % exc
+        remaining = _text(leftovers.stdout).strip()
+        if remaining:
+            return ("killed process group, but processes matching %s remain on %s: %s"
+                    % (run_dir, self.host, remaining.replace("\n", "; ")[:200]))
+        return "killed process group for %s on %s (no leftovers)" % (run_dir, self.host)
 
 
 class LocalTransport(Transport):
@@ -401,14 +505,77 @@ class LocalTransport(Transport):
     def run_command(self, command, cwd=None, env=None, timeout=COMMAND_TIMEOUT):
         return run_on_host(command, cwd=cwd, env=env, timeout=timeout)
 
-    def run(self, command, timeout=RUN_TIMEOUT, env=None):
+    def run(self, command, timeout=RUN_TIMEOUT, env=None, run_dir=None):
         command = self._wrap_env(command, env)
+        tracked = self._tracked_command(command, run_dir) if run_dir else command
+        # start_new_session mirrors the setsid used for docker/ssh: the shell and
+        # everything it forks share one process group, so a timeout can kill the
+        # whole tree instead of orphaning the simulator.
         try:
-            proc = subprocess.run(["bash", "-lc", command],
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+            proc = subprocess.Popen(["bash", "-lc", tracked],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    start_new_session=True)
+            stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            raise TransportError("command timed out after %.0fs: %s" % (timeout, command))
-        return self._split(proc)
+            self._kill_group(proc)
+            stdout, stderr = proc.communicate()
+            raise TransportTimeout("command timed out after %.0fs: %s" % (timeout, command))
+        return {"rc": proc.returncode, "stdout": _text(stdout), "stderr": _text(stderr)}
+
+    @staticmethod
+    def _kill_group(proc):
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (OSError, AttributeError):
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+    def cleanup(self, run_dir):
+        self._kill_recorded_group(run_dir)
+        remaining = self._leftovers(run_dir)
+        if remaining:
+            return ("killed process group, but processes matching %s remain on this machine: %s"
+                    % (run_dir, remaining.replace("\n", "; ")[:200]))
+        return "killed process group for %s on this machine (no leftovers)" % run_dir
+
+    def _kill_recorded_group(self, run_dir):
+        pidfile = self._pidfile(run_dir)
+        try:
+            with open(pidfile, encoding="utf-8") as handle:
+                pid = int(handle.read().strip())
+        except (OSError, ValueError):
+            pid = None
+        if pid:
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.killpg(os.getpgid(pid), sig)
+                except OSError:
+                    try:
+                        os.kill(pid, sig)
+                    except OSError:
+                        break
+                time.sleep(0.5)
+        try:
+            subprocess.run(["bash", "-lc", "pkill -f %s >/dev/null 2>&1 || true"
+                            % shlex.quote(run_dir)],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        try:
+            os.unlink(pidfile)
+        except OSError:
+            pass
+
+    def _leftovers(self, run_dir):
+        try:
+            proc = subprocess.run(["bash", "-lc", self._leftover_check_script(run_dir)],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  timeout=30, text=True)
+            return (proc.stdout or "").strip()
+        except (OSError, subprocess.SubprocessError):
+            return ""
 
 
 def build(kind=None):

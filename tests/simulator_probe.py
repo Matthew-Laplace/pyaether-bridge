@@ -25,8 +25,10 @@ import math
 import os
 import pathlib
 import shutil
+import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -217,6 +219,15 @@ def main():
 
     # ---- 5. strict accessors ---------------------------------------------
     print("-- 5. strict accessors --")
+    op = S.run("op.cir", backend="ngspice", timeout=120, run_id="probe-op",
+               netlist_text="* op\nV1 in 0 dc 1\nR1 in out 1k\nR2 out 0 1k\n.op\n.end\n")
+    try:
+        vout = S.scalar(op["data"], "v(out)")
+        check("scalar() reads a single-point operating point (0.5 V divider)",
+              abs(vout - 0.5) < 1e-6, "v(out)=%r" % vout)
+    except ValueError as exc:
+        check("scalar() reads a single-point operating point (0.5 V divider)",
+              False, str(exc))
     try:
         S.scalar({"a": "1.0"}, "a")
         check("scalar() rejects a string", False, "no exception")
@@ -237,6 +248,61 @@ def main():
         check("scalar() rejects NaN", False, "no exception")
     except ValueError:
         check("scalar() rejects NaN", True)
+    vector_data = S.parse_psf_ascii('HEADER\nVALUE\n"v(out)" (\n1.0 2.0\n3.0\n)\n"v(in)" 0.5\n')
+    check("PSF parser keeps vectors split over several lines",
+          vector_data.get("v(out)") == [1.0, 2.0, 3.0],
+          "parsed=%r" % (vector_data,))
+    check("PSF parser still reads a scalar after a multi-line vector",
+          vector_data.get("v(in)") == 0.5, "parsed=%r" % (vector_data,))
+    print()
+
+    # ---- 6. per-run isolation and quoting --------------------------------
+    print("-- 6. per-run isolation and command quoting --")
+    first = S.run("a.cir", backend="ngspice", timeout=120,
+                  netlist_text="* op\nV1 in 0 dc 1\nR1 in out 1k\nR2 out 0 1k\n.op\n.end\n")
+    second = S.run("a.cir", backend="ngspice", timeout=120,
+                   netlist_text="* op\nV1 in 0 dc 1\nR1 in out 1k\nR2 out 0 1k\n.op\n.end\n")
+    check("two runs started in the same second get different directories",
+          first["metadata"]["work_dir"] != second["metadata"]["work_dir"],
+          "%s vs %s" % (first["metadata"]["work_dir"], second["metadata"]["work_dir"]))
+
+    saved_cmd = config.SIM_CMD
+    try:
+        config.SIM_CMD = "mysim -i {netlist} -o {log}"
+        quoted, _ = S.build_command("custom", netlist="/tmp/my dir/tb x.cir",
+                                    workdir="/tmp/my dir", log="/tmp/my dir/s.log",
+                                    raw="/tmp/r.raw")
+        check("custom template quotes substituted paths",
+              "'/tmp/my dir/tb x.cir'" in quoted and "'/tmp/my dir/s.log'" in quoted,
+              quoted)
+    finally:
+        config.SIM_CMD = saved_cmd
+
+    # A timeout must not leave the simulator running: a real run would keep a
+    # licence seat and CPU cores busy. Uses a plain `sleep` so the check does not
+    # depend on any simulator's runtime.
+    marker = "pyaether-timeout-probe-%d" % os.getpid()
+    saved_cmd = config.SIM_CMD
+    try:
+        config.SIM_CMD = "sh -c 'sleep 60; echo " + marker + " {netlist}'"
+        timed = S.run("hang.cir", backend="custom", timeout=3, run_id=marker,
+                      netlist_text="* hang\n.end\n")
+        check("a timeout is reported as a failure, not a success",
+              timed["ok"] is False and timed["metadata"].get("timed_out") is True,
+              "status=%s" % timed["status"])
+        check("the timeout result explains what cleanup did",
+              any("cleanup:" in item for item in timed["errors"]),
+              str(timed["errors"]))
+        time.sleep(1.5)
+        listing = subprocess.run(
+            ["bash", "-lc", "ps -eo args 2>/dev/null | grep -F %s | grep -v grep || true"
+             % marker],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        check("no simulator process is left behind after a timeout",
+              not listing.stdout.strip(),
+              "still running: %s" % listing.stdout.strip()[:200])
+    finally:
+        config.SIM_CMD = saved_cmd
     print()
 
     return finish()

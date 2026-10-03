@@ -111,6 +111,11 @@ Three rules make the result trustworthy:
    the raw exit code.
 3. **No invented numbers.** Parsers only report what they understood; use the
    strict accessors below when a downstream calculation must fail loudly.
+4. **A timeout cleans up after itself.** Killing the local `docker exec`/`ssh`
+   client does *not* stop the simulator on the far side, so every run is started
+   in its own process group and, on timeout, that group is killed and the result
+   reports what the cleanup found. Without this a timed-out run keeps burning a
+   licence seat and CPU cores.
 
 ```python
 from pyaether_bridge import simulators
@@ -131,7 +136,8 @@ become a number.
 Two options, both without forking the bridge:
 
 **1. Reuse the `custom` backend.** Give the command template; `{netlist}`,
-`{workdir}`, `{log}`, `{raw}` and `{mode}` are substituted:
+`{workdir}`, `{log}`, `{raw}` and `{mode}` are substituted (each value is
+shell-quoted, so paths with spaces are safe):
 
 ```bash
 # Xyce reading a SPICE deck
@@ -142,9 +148,17 @@ export PYAETHER_SIM_CMD='Xyce -l {log} -r {raw}.raw {netlist}'
 export PYAETHER_SIM_CMD='ae-sim -batch -i {netlist} -o {workdir}'
 ```
 
-If the tool writes an ASCII SPICE rawfile, the existing parser already handles
-the numbers. Otherwise the run still returns `ok`/`errors`/`artifacts`, and
-`status` is `PARTIAL` with a clear message when the output could not be read.
+**Ask the tool for a text rawfile.** The parser reads ASCII; a binary rawfile
+leaves `data` empty and the run comes back as `PARTIAL` with "no parseable
+result data" (the bridge will not pretend it read numbers it did not). For
+ngspice that means adding the environment variable to the template:
+
+```bash
+export PYAETHER_SIM_CMD='SPICE_ASCIIRAWFILE=1 ngspice -b -o {log} -r {raw} {netlist}'
+```
+
+Either way the run still returns `ok`/`errors`/`artifacts`, so a tool whose
+output cannot be parsed is still reported honestly rather than silently.
 
 **2. Add a first-class backend** in `pyaether_bridge/simulators.py`:
 

@@ -34,6 +34,7 @@ import shlex
 import shutil
 import tempfile
 import time
+import uuid
 
 from . import config, transports
 
@@ -245,13 +246,38 @@ def parse_psf_ascii(text):
     ``"name" (v1 v2 ...)`` vectors and ignores the SECTION/TYPE layout. Anything
     it cannot understand is simply absent from the result, which stops a caller
     from treating a half-parsed file as a successful run.
+
+    Vectors may be split over several lines (``"x" (`` then the numbers then
+    ``)``); those are accumulated, because dropping them would silently lose
+    waveform data.
     """
     data = {}
-    pending = None
+    pending = None          # a scalar whose value sits on the next line
+    vector_name = None      # a vector currently being accumulated
+    vector_values = []
+
+    def flush_vector():
+        if vector_name is not None and vector_values:
+            data[vector_name] = list(vector_values)
+
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line:
             continue
+
+        if vector_name is not None:
+            body = line.rstrip(")").strip()
+            closed = line.endswith(")")
+            for token in body.split():
+                try:
+                    vector_values.append(float(token))
+                except ValueError:
+                    vector_values.append(float("nan"))
+            if closed:
+                flush_vector()
+                vector_name, vector_values = None, []
+            continue
+
         if line.startswith(("HEADER", "TYPE", "SWEEP", "TRACE", "VALUE", "END", "SECTION")):
             pending = None
             continue
@@ -269,14 +295,24 @@ def parse_psf_ascii(text):
         name = line[1:closing]
         rest = line[closing + 1:].strip()
         if rest.startswith("("):
-            values = []
-            for token in rest.strip("()").split():
-                try:
-                    values.append(float(token))
-                except ValueError:
-                    values.append(float("nan"))
-            if values:
-                data[name] = values
+            if rest.endswith(")"):
+                values = []
+                for token in rest.strip("()").split():
+                    try:
+                        values.append(float(token))
+                    except ValueError:
+                        values.append(float("nan"))
+                if values:
+                    data[name] = values
+            else:
+                # "name" (        <- values continue on the following lines
+                vector_name = name
+                vector_values = []
+                for token in rest.lstrip("(").split():
+                    try:
+                        vector_values.append(float(token))
+                    except ValueError:
+                        vector_values.append(float("nan"))
         elif rest:
             try:
                 data[name] = float(rest)
@@ -284,14 +320,25 @@ def parse_psf_ascii(text):
                 pending = name
         else:
             pending = name
+    flush_vector()
     return data
 
 
 def scalar(data, key):
-    """Return one exact, finite real scalar (raises instead of guessing)."""
+    """Return one exact, finite real scalar (raises instead of guessing).
+
+    A single-point analysis (``.op``, a one-step sweep) is stored as a
+    one-element vector, so that form is accepted too -- otherwise the most
+    common "read the operating point" call would fail on a technicality.
+    """
     if key not in data:
         raise ValueError("result has no key %r" % key)
     value = data[key]
+    if isinstance(value, list):
+        if len(value) != 1:
+            raise ValueError("key %r is a %d-element vector, not a scalar"
+                             % (key, len(value)))
+        value = value[0]
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError("key %r is not a real scalar" % key)
     number = float(value)
@@ -353,8 +400,12 @@ def build_command(backend, *, netlist, workdir, log, raw, mode=None, args=None):
             raise SimulatorError(
                 "backend 'custom' needs PYAETHER_SIM_CMD, for example "
                 "\"mysim -b {netlist} -o {log}\"")
-        command = config.SIM_CMD.format(netlist=netlist, workdir=workdir,
-                                        log=log, raw=raw, mode=mode or "")
+        # Quote every substituted value: run directories and user paths may
+        # contain spaces, which would otherwise split into several arguments.
+        command = config.SIM_CMD.format(
+            netlist=shlex.quote(netlist), workdir=shlex.quote(workdir),
+            log=shlex.quote(log), raw=shlex.quote(raw),
+            mode=shlex.quote(mode or ""))
         if args:
             command += " " + _quote_all(args)
         return command, {}
@@ -488,7 +539,10 @@ def run(netlist, *, backend=None, transport=None, workdir=None, timeout=None,
                              % (backend, ", ".join(sorted(backends()))))
     target = transport or transport_for_simulator(backend)
     timeout = float(timeout or config.SIM_TIMEOUT or 600)
-    run_id = run_id or time.strftime("%Y%m%d-%H%M%S")
+    # A second-resolution id collides when two runs start in the same second,
+    # and two runs sharing a directory overwrite each other's netlist, log and
+    # rawfile. Add a short random suffix so the run directory is unique.
+    run_id = run_id or "%s-%s" % (time.strftime("%Y%m%d-%H%M%S"), uuid.uuid4().hex[:6])
     run_dir = os.path.join(workdir or config.SIM_WORKDIR,
                            "run-%s-%s" % (backend, run_id))
 
@@ -523,7 +577,21 @@ def run(netlist, *, backend=None, transport=None, workdir=None, timeout=None,
     command, env = build_command(backend, netlist=netlist_path, workdir=run_dir,
                                  log=log_path, raw=raw_path, mode=mode, args=args)
     try:
-        executed = target.run(command, timeout=timeout, env=env)
+        executed = target.run(command, timeout=timeout, env=env, run_dir=run_dir)
+    except transports.TransportTimeout as exc:
+        # Killing the local client does not stop the simulator: `docker exec`
+        # and `ssh` leave the remote process running (measured -- a 3 s timeout
+        # left `sleep 45` alive inside the container, which in a real run means
+        # a licence seat and CPU cores stay busy). Ask the target to clean up by
+        # the run directory, which is unique per run.
+        cleanup = target.cleanup(run_dir)
+        return _result(STATUS_FAILURE, backend,
+                       errors=["timed out after %.0fs: %s" % (timeout, exc),
+                               "cleanup: %s" % cleanup],
+                       metadata=metadata({"command": command, "includes": staged_includes,
+                                          "timed_out": True,
+                                          "timings": {"staging_s": staging_seconds,
+                                                      "total_s": round(time.time() - started, 3)}}))
     except transports.TransportError as exc:
         return _result(STATUS_FAILURE, backend,
                        errors=["transport failure: %s" % exc],
