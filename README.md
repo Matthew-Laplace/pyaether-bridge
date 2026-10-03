@@ -150,6 +150,7 @@ target, so ngspice can run on your laptop while PyAether lives in a container.
 | --- | --- | --- |
 | `ngspice` | open source | analysis declared in the netlist |
 | `spectre` | commercial | `spectre`, `aps`, `x`, `cx`, `ax`, `mx`, `lx`, `vx` |
+| `alps` | commercial (Empyrean) | `basic`, `turbo`, `pro` |
 | `custom` | any simulator | your own command template |
 
 ```bash
@@ -160,6 +161,7 @@ export PYAETHER_SIM_TARGET=local
 
 # any other tool, including an in-house or vendor simulator
 export PYAETHER_SIM_CMD='Xyce -l {log} -r {raw}.raw {netlist}'
+export PYAETHER_SIM_ENV='SPICE_ASCIIRAWFILE=1'   # when the tool defaults to binary output
 ./bin/pyaether sim run rc.cir --backend custom
 ```
 
@@ -167,6 +169,35 @@ export PYAETHER_SIM_CMD='Xyce -l {log} -r {raw}.raw {netlist}'
 success, failures are classified (netlist read error / license error /
 convergence failure / missing file / crash), and the strict accessors refuse to
 invent numbers. See [docs/SIMULATORS.md](docs/SIMULATORS.md).
+
+## One machine, several targets (profiles)
+
+The same checkout can talk to several installations without editing anything:
+a profile is a named group of settings in the user config file, and a
+``.pyaether-profile`` file binds a directory to one of them.
+
+```bash
+# ~/.cache/pyaether-bridge/config.json
+# {
+#   "default_profile": "container",
+#   "profiles": {
+#     "container": {"transport": "docker", "container": "empyrean-gui"},
+#     "lab":       {"transport": "ssh", "ssh_host": "aether@lab-server",
+#                   "sim_backend": "alps", "sim_target": "ssh"}
+#   }
+# }
+
+./bin/pyaether profile list          # what is defined, and which is active
+./bin/pyaether profile show          # active profile + every resolved setting
+./bin/pyaether profile bind lab      # bind this directory to "lab"
+./bin/pyaether profile clear         # drop the binding
+PYAETHER_PROFILE=lab ./bin/pyaether status   # or pick one for a single command
+```
+
+Resolution order for every setting is **environment variable > active profile >
+top-level config > default**, and each profile gets its own daemon socket
+(`<data dir>/profiles/<name>/daemon.sock`), so two profiles never share a
+session by accident.
 
 Conventions: human-readable output is English, `--json` prints raw JSON. Exit
 code `0` for success, `1` for a runtime failure (daemon won't start, catalog
@@ -260,8 +291,12 @@ prefers the documented entry with the full typed signature.
 | `PYAETHER_SIM_SSH_HOST` / `_PORT` / `_OPTS` | Simulator SSH target when it differs from the bridge target |
 | `PYAETHER_SIM_CONTAINER` | Simulator container when it differs from the bridge container |
 | `PYAETHER_SIM_CMD` | Command template for the `custom` backend (`{netlist}` `{workdir}` `{log}` `{raw}` `{mode}`) |
+| `PYAETHER_SIM_ENV` | Extra environment for any simulator command, e.g. `SPICE_ASCIIRAWFILE=1` (comma-separated `KEY=VALUE`) |
 | `PYAETHER_NGSPICE_BIN` | ngspice binary name or path (default `ngspice`) |
 | `PYAETHER_SPECTRE_BIN` | Spectre binary name or path (default `spectre`) |
+| `PYAETHER_ALPS_BIN` | Empyrean ALPS binary (default `alps`; needs your own valid licence) |
+| `PYAETHER_ALPS_THREADS` | Threads passed to ALPS as `-mt` (optional) |
+| `PYAETHER_PROFILE` | Active profile for this command (overrides the binding file) |
 
 Machine-specific settings can also live in
 `$PYAETHER_BRIDGE_HOME/config.json` (default
@@ -335,6 +370,8 @@ python3 tests/mcp_probe.py               # MCP protocol + every tool
 python3 tests/transport_probe.py         # transport layer: local + fake-ssh stub
 PYAETHER_TEST_DOCKER=1 python3 tests/transport_probe.py   # also exercise a real container
 python3 tests/simulator_probe.py         # real ngspice run + result contract
+python3 tests/profile_probe.py           # profile resolution and daemon isolation
+PYAETHER_ALPS_PROBE=1 python3 tests/alps_live_probe.py    # vendor simulator, needs a licence
 ```
 
 ## Documentation

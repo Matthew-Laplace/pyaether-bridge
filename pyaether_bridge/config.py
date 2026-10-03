@@ -29,12 +29,27 @@ Environment variables
     PYAETHER_NGSPICE_BIN     ngspice binary name or path
     PYAETHER_SPECTRE_BIN     Spectre binary name or path
     PYAETHER_SIM_CMD         command template for the "custom" backend
+    PYAETHER_PROFILE         name of the profile to activate
 
 User config file (optional): <DATA_DIR>/config.json, same keys in snake_case
     {"transport": "ssh", "ssh_host": "user@server", "container": "...",
      "python": "...", "remote_dir": "...", "license_server": "...",
      "docs_dir": "...", "catalog_db": "...",
-     "sim_target": "local", "sim_backend": "ngspice", "sim_timeout": 600}
+     "sim_target": "local", "sim_backend": "ngspice", "sim_timeout": 600,
+     "default_profile": "lab",
+     "profiles": {"lab": {"transport": "ssh", "ssh_host": "aether@lab"}}}
+
+Profiles
+    A profile is a named set of the same keys, so one machine can talk to
+    several targets (a container here, a lab server there) without editing the
+    repository. Resolution order for every setting is:
+
+        environment variable  >  active profile  >  top-level config  >  default
+
+    The active profile comes from ``PYAETHER_PROFILE``, else the nearest
+    ``.pyaether-profile`` file (``pyaether profile bind <name>`` writes one in
+    the current directory), else ``default_profile`` in the config file. The
+    daemon socket is scoped per profile so two profiles never share a session.
 """
 
 from __future__ import annotations
@@ -69,10 +84,76 @@ def _load_user_config():
 
 USER_CONFIG = _load_user_config()
 
+# --- profiles -------------------------------------------------------------
+PROFILE_BINDING_FILENAME = ".pyaether-profile"
+PROFILE_SEARCH_DEPTH = 5  # how many parent directories to scan for the binding file
+
+
+def _clean(value):
+    text = str(value or "").strip()
+    return text or None
+
+
+def _read_binding(path):
+    try:
+        for line in pathlib.Path(path).read_text(encoding="utf-8").splitlines():
+            name = _clean(line)
+            if name and not name.startswith("#"):
+                return name
+    except OSError:
+        return None
+    return None
+
+
+def find_binding(start=None):
+    """Path of the nearest ``.pyaether-profile`` file, or None."""
+    current = pathlib.Path(start or os.getcwd()).resolve()
+    for _ in range(PROFILE_SEARCH_DEPTH + 1):
+        candidate = current / PROFILE_BINDING_FILENAME
+        if candidate.is_file():
+            return candidate
+        if current.parent == current:
+            break
+        current = current.parent
+    return None
+
+
+def resolve_profile():
+    """Return ``(name, source)`` for the active profile, or ``(None, reason)``."""
+    from_env = _clean(os.environ.get("PYAETHER_PROFILE"))
+    if from_env:
+        return from_env, "PYAETHER_PROFILE"
+    binding = find_binding()
+    if binding is not None:
+        name = _read_binding(binding)
+        if name:
+            return name, str(binding)
+    default = _clean(USER_CONFIG.get("default_profile"))
+    if default:
+        return default, "default_profile in config.json"
+    return None, "no profile bound"
+
+
+PROFILE, PROFILE_SOURCE = resolve_profile()
+PROFILE_SETTINGS = USER_CONFIG.get("profiles", {}).get(PROFILE, {}) if PROFILE else {}
+if not isinstance(PROFILE_SETTINGS, dict):
+    PROFILE_SETTINGS = {}
+
+
+def known_profiles():
+    """``{name: settings}`` for every profile defined in the config file."""
+    profiles = USER_CONFIG.get("profiles")
+    if not isinstance(profiles, dict):
+        return {}
+    return {name: value for name, value in profiles.items() if isinstance(value, dict)}
+
 
 def setting(env_name, key, default=None):
-    """Resolution order: environment variable > user config file > default."""
+    """Resolution order: environment variable > active profile > config > default."""
     value = os.environ.get(env_name)
+    if value:
+        return value
+    value = PROFILE_SETTINGS.get(key)
     if value:
         return value
     value = USER_CONFIG.get(key)
@@ -108,13 +189,24 @@ SIM_SSH_OPTS = setting("PYAETHER_SIM_SSH_OPTS", "sim_ssh_opts", "")
 SIM_CONTAINER = setting("PYAETHER_SIM_CONTAINER", "sim_container", "")
 # Command template for the "custom" backend; empty means "not configured".
 SIM_CMD = setting("PYAETHER_SIM_CMD", "sim_cmd", "")
+# Extra environment for any simulator command, as "KEY=VALUE,KEY2=VALUE2".
+# Needed when a tool writes binary output by default (ngspice wants
+# SPICE_ASCIIRAWFILE=1 for a text rawfile) and no built-in backend sets it.
+SIM_ENV = setting("PYAETHER_SIM_ENV", "sim_env", "")
 NGSPICE_BIN = setting("PYAETHER_NGSPICE_BIN", "ngspice_bin", "ngspice")
 SPECTRE_BIN = setting("PYAETHER_SPECTRE_BIN", "spectre_bin", "spectre")
 SPECTRE_MODE = setting("PYAETHER_SPECTRE_MODE", "spectre_mode", "ax")
+# Empyrean ALPS (the vendor simulator). Requires the user's own valid licence;
+# this bridge never reads, alters or works around licensing.
+ALPS_BIN = setting("PYAETHER_ALPS_BIN", "alps_bin", "alps")
+ALPS_THREADS = setting("PYAETHER_ALPS_THREADS", "alps_threads", "")
 
-DAEMON_SOCK = _env_path("PYAETHER_DAEMON_SOCK") or (DATA_DIR / "daemon.sock")
-DAEMON_PID = DATA_DIR / "daemon.pid"
-DAEMON_LOG = DATA_DIR / "daemon.log"
+# Each profile gets its own socket/pid/log: two profiles point at different
+# targets, so sharing one daemon would hand out the wrong session.
+RUNTIME_DIR = (DATA_DIR / "profiles" / PROFILE) if PROFILE else DATA_DIR
+DAEMON_SOCK = _env_path("PYAETHER_DAEMON_SOCK") or (RUNTIME_DIR / "daemon.sock")
+DAEMON_PID = RUNTIME_DIR / "daemon.pid"
+DAEMON_LOG = RUNTIME_DIR / "daemon.log"
 
 # Catalog lives in the project so the whole bridge stays self-contained;
 # PYAETHER_CATALOG_DB overrides it (tests point it at a temp file).

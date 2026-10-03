@@ -172,7 +172,7 @@ TOOLS = [
                 },
                 "backend": {
                     "type": "string",
-                    "enum": ["ngspice", "spectre", "custom"],
+                    "enum": ["ngspice", "spectre", "alps", "custom"],
                     "description": "Simulator backend; defaults to PYAETHER_SIM_BACKEND "
                                    "(ngspice).",
                 },

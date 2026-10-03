@@ -88,6 +88,10 @@ SPECTRE_MODE_NOTES = {
 # Informational: for ngspice the analysis lives inside the netlist.
 NGSPICE_MODES = ["tran", "ac", "dc", "op", "noise"]
 
+# Empyrean ALPS accuracy levels, taken from `alps -h` ("-mode <name> Specify
+# the level of simulation accuracy and speed ... basic, turbo or pro").
+ALPS_MODES = ["basic", "turbo", "pro"]
+
 
 class SimulatorError(RuntimeError):
     """Unsupported backend, unusable configuration, or a staging failure."""
@@ -122,6 +126,16 @@ def backends():
                      "placeholders. Use this for a simulator whose flags you know; "
                      "the bridge refuses to guess flags for an unknown tool.",
         },
+        "alps": {
+            "kind": "commercial (Empyrean)",
+            "binary_config": "PYAETHER_ALPS_BIN",
+            "default_binary": "alps",
+            "modes": ALPS_MODES,
+            "notes": "Empyrean ALPS via its own batch CLI: alps -o <outdir> -log <name> "
+                     "<netlist>. Also drives the vendor flow that Aether/MDE normally "
+                     "configures in the GUI. Requires a valid Empyrean licence; "
+                     "this bridge does not touch licensing in any way.",
+        },
     }
 
 
@@ -154,7 +168,10 @@ def _classify(output):
         errors.append("convergence failure")
     elif "no such file" in lower or "cannot open" in lower or "can't open" in lower:
         errors.append("file not found")
-    elif "segmentation" in lower or "core dumped" in lower or "fatal error" in lower:
+    elif ("segmentation" in lower or "core dumped" in lower or "fatal error" in lower
+          or "internal error" in lower or "abrt(" in lower):
+        # "*** INTERNAL ERROR: ABRT(6) ***" is how Empyrean ALPS reports a hard
+        # abort; without this it would only be caught by the generic scan below.
         errors.append("simulator crashed")
 
     if not errors:
@@ -364,6 +381,20 @@ def _quote_all(parts):
     return " ".join(shlex.quote(str(part)) for part in parts)
 
 
+def extra_env():
+    """``PYAETHER_SIM_ENV`` parsed into a dict ("KEY=VALUE,KEY2=VALUE2")."""
+    env = {}
+    for item in (config.SIM_ENV or "").split(","):
+        item = item.strip()
+        if not item or "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        key = key.strip()
+        if key:
+            env[key] = value.strip()
+    return env
+
+
 def build_command(backend, *, netlist, workdir, log, raw, mode=None, args=None):
     """Build the shell command (and extra environment) for one backend.
 
@@ -409,6 +440,23 @@ def build_command(backend, *, netlist, workdir, log, raw, mode=None, args=None):
         if args:
             command += " " + _quote_all(args)
         return command, {}
+    if backend == "alps":
+        if mode and mode not in ALPS_MODES:
+            raise SimulatorError("unsupported ALPS mode %r (expected one of %s)"
+                                 % (mode, ", ".join(ALPS_MODES)))
+        # `-o` is the output *directory* and `-log` a name resolved inside it;
+        # both verified from `alps -h` and by running the bundled demo netlists.
+        # ALPS writes its PSF results below -o, so `raw` is that directory.
+        out_dir = os.path.join(workdir, "psf")
+        argv = shlex.split(config.ALPS_BIN or "alps")
+        argv.extend(["-o", out_dir, "-log", os.path.basename(log)])
+        if mode:
+            argv.extend(["-mode", mode])
+        if config.ALPS_THREADS:
+            argv.extend(["-mt", str(config.ALPS_THREADS)])
+        argv.extend(args)
+        argv.append(netlist)
+        return _quote_all(argv), {}
     raise SimulatorError("unknown backend %r (expected %s)"
                          % (backend, ", ".join(sorted(backends()))))
 
@@ -469,9 +517,15 @@ def probe(backend, *, transport=None, timeout=60.0):
         return {"backend": backend, "target": target.label(), "available": configured,
                 "detail": "" if configured else "PYAETHER_SIM_CMD is not set",
                 "version": "", "command": config.SIM_CMD or ""}
-    binary = (config.NGSPICE_BIN if backend == "ngspice" else config.SPECTRE_BIN) or backend
-    command = "command -v %s && (%s -v 2>&1 | head -3 || true)" % (
-        shlex.quote(binary), shlex.quote(binary))
+    if backend == "alps":
+        binary = config.ALPS_BIN or "alps"
+        # ALPS rejects "-version"; "-V" prints the build info.
+        command = "command -v %s && (%s -V 2>&1 | head -8 || true)" % (
+            shlex.quote(binary), shlex.quote(binary))
+    else:
+        binary = (config.NGSPICE_BIN if backend == "ngspice" else config.SPECTRE_BIN) or backend
+        command = "command -v %s && (%s -v 2>&1 | head -3 || true)" % (
+            shlex.quote(binary), shlex.quote(binary))
     try:
         result = target.run(command, timeout=timeout)
     except transports.TransportError as exc:
@@ -481,9 +535,17 @@ def probe(backend, *, transport=None, timeout=60.0):
     version = ""
     if available:
         for line in (result["stdout"] or "").splitlines():
-            if not line.startswith("/"):
-                version = line.strip()
-                break
+            stripped = line.strip()
+            if not stripped or stripped.startswith("/"):
+                continue
+            if backend == "alps":
+                # "Branch 2025.09.sp1" is the meaningful line in `alps -V`.
+                if stripped.lower().startswith("branch"):
+                    version = stripped
+                    break
+                continue
+            version = stripped
+            break
     return {"backend": backend, "target": target.label(), "available": available,
             "detail": "" if available else ("%s not found on target" % binary),
             "version": version, "command": binary}
@@ -518,10 +580,25 @@ def _read(path):
     if not path:
         return ""
     try:
-        with open(path, encoding="utf-8", errors="replace") as handle:
-            return handle.read()
+        with open(path, "rb") as handle:
+            raw = handle.read()
     except OSError:
         return ""
+    # A binary rawfile is not a parse failure of ours: report it as empty text
+    # and let the caller explain that the tool wrote binary output.
+    if b"\x00" in raw[:4096]:
+        return ""
+    return raw.decode("utf-8", "replace")
+
+
+def _looks_binary(path):
+    if not path or not os.path.exists(path):
+        return False
+    try:
+        with open(path, "rb") as handle:
+            return b"\x00" in handle.read(4096)
+    except OSError:
+        return False
 
 
 def run(netlist, *, backend=None, transport=None, workdir=None, timeout=None,
@@ -553,8 +630,14 @@ def run(netlist, *, backend=None, transport=None, workdir=None, timeout=None,
         except OSError as exc:
             raise SimulatorError("cannot read netlist %s: %s" % (netlist, exc))
     netlist_path = os.path.join(run_dir, os.path.basename(netlist))
-    log_path = os.path.join(run_dir, "sim.log")
-    raw_path = os.path.join(run_dir, "raw.out")
+    if backend == "alps":
+        # ALPS resolves -log relative to -o and writes its PSF tree there.
+        psf_dir = os.path.join(run_dir, "psf")
+        log_path = os.path.join(psf_dir, "sim.log")
+        raw_path = psf_dir
+    else:
+        log_path = os.path.join(run_dir, "sim.log")
+        raw_path = os.path.join(run_dir, "raw.out")
 
     started = time.time()
 
@@ -576,6 +659,11 @@ def run(netlist, *, backend=None, transport=None, workdir=None, timeout=None,
 
     command, env = build_command(backend, netlist=netlist_path, workdir=run_dir,
                                  log=log_path, raw=raw_path, mode=mode, args=args)
+    # User-provided environment wins over backend defaults, so any tool can be
+    # told to write text output (e.g. ngspice via SPICE_ASCIIRAWFILE=1).
+    merged_env = dict(env or {})
+    merged_env.update(extra_env())
+    env = merged_env
     try:
         executed = target.run(command, timeout=timeout, env=env, run_dir=run_dir)
     except transports.TransportTimeout as exc:
@@ -603,11 +691,38 @@ def run(netlist, *, backend=None, transport=None, workdir=None, timeout=None,
     errors, warnings = _classify((executed["stdout"] or "") + "\n" + (executed["stderr"] or ""))
 
     parse_started = time.time()
-    listing = target.run("ls -1 %s 2>/dev/null" % shlex.quote(run_dir), timeout=60.0)
+    # List recursively, capped: an ALPS run scatters its PSF files across a
+    # subdirectory tree, and a runaway run can create a lot of them.
+    listing = target.run("find %s -maxdepth 3 -type f 2>/dev/null | head -200"
+                         % shlex.quote(run_dir), timeout=60.0)
     artifacts = [name.strip() for name in (listing["stdout"] or "").splitlines() if name.strip()]
     local_root = tempfile.mkdtemp(prefix="pyaether-sim-")
     local_log = _fetch(target, log_path, local_root)
-    local_raw = _fetch(target, raw_path, local_root)
+
+    data = {}
+    plots = []
+    if backend == "alps":
+        # PSF results live in a tree; pull back the small text ones and try to
+        # read them. ALPS's PSF layout is NOT verified here (the vendor binary
+        # aborts under x86_64 emulation on this host), so an unparsed run is
+        # reported as PARTIAL instead of being dressed up as a success.
+        psf_candidates = target.run(
+            "find %s -maxdepth 2 -type f -size -5M 2>/dev/null | head -40"
+            % shlex.quote(raw_path), timeout=60.0)
+        for candidate in (psf_candidates["stdout"] or "").splitlines():
+            candidate = candidate.strip()
+            if not candidate or candidate.endswith(".log"):
+                continue
+            local = _fetch(target, candidate, local_root)
+            text = _read(local)
+            if not text:
+                continue
+            parsed = parse_psf_ascii(text)
+            for key, value in parsed.items():
+                data.setdefault(key, value)
+        local_raw = ""
+    else:
+        local_raw = _fetch(target, raw_path, local_root)
 
     log_text = _read(local_log)
     if log_text:
@@ -615,17 +730,16 @@ def run(netlist, *, backend=None, transport=None, workdir=None, timeout=None,
         errors.extend(item for item in extra_errors if item not in errors)
         warnings.extend(item for item in extra_warnings if item not in warnings)
 
-    raw_text = _read(local_raw)
-    data = {}
-    plots = []
-    if raw_text.lstrip().startswith(("Title:", "Plotname:")):
-        plots = parse_ascii_raw(raw_text)
-        for plot in plots:
-            for name, values in plot["data"].items():
-                if values:
-                    data[name] = values
-    elif raw_text:
-        data = parse_psf_ascii(raw_text)
+    if backend != "alps":
+        raw_text = _read(local_raw)
+        if raw_text.lstrip().startswith(("Title:", "Plotname:")):
+            plots = parse_ascii_raw(raw_text)
+            for plot in plots:
+                for name, values in plot["data"].items():
+                    if values:
+                        data[name] = values
+        elif raw_text:
+            data = parse_psf_ascii(raw_text)
 
     if executed["rc"] != 0:
         status = STATUS_FAILURE
@@ -636,7 +750,14 @@ def run(netlist, *, backend=None, transport=None, workdir=None, timeout=None,
         # Clean exit but nothing we could understand: do not claim success
         # without usable numbers.
         status = STATUS_PARTIAL
-        errors.append("no parseable result data (check the raw output format)")
+        if backend != "alps" and _looks_binary(local_raw):
+            errors.append(
+                "the simulator wrote binary output, which this parser cannot "
+                "read; make it write text (for ngspice set "
+                "PYAETHER_SIM_ENV=SPICE_ASCIIRAWFILE=1, or use the ngspice "
+                "backend which sets it for you)")
+        else:
+            errors.append("no parseable result data (check the raw output format)")
     else:
         status = STATUS_SUCCESS
 

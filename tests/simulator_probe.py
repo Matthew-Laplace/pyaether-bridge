@@ -210,11 +210,57 @@ def main():
     check("every Spectre mode carries a documented note",
           set(S.SPECTRE_MODES) <= set(S.SPECTRE_MODE_NOTES),
           str(sorted(set(S.SPECTRE_MODES) - set(S.SPECTRE_MODE_NOTES))))
+    alps_command, _ = S.build_command("alps", netlist="/w/tb.sp", workdir="/w/run",
+                                      log="/w/run/psf/sim.log", raw="/w/run/psf",
+                                      mode="turbo")
+    check("alps builds the vendor batch command shape",
+          "-o /w/run/psf" in alps_command and "-log sim.log" in alps_command
+          and "-mode turbo" in alps_command and alps_command.rstrip().endswith("/w/tb.sp"),
+          alps_command[:200])
+    try:
+        S.build_command("alps", netlist="n", workdir="w", log="l", raw="r", mode="fast")
+        check("unknown ALPS mode is rejected", False, "no exception raised")
+    except S.SimulatorError as exc:
+        check("unknown ALPS mode is rejected", "unsupported ALPS mode" in str(exc), str(exc))
+    check("ALPS accuracy levels are the documented ones",
+          S.ALPS_MODES == ["basic", "turbo", "pro"], str(S.ALPS_MODES))
     custom, _ = S.build_command("custom", netlist="/w/n.cir", workdir="/w",
                                 log="/w/l.log", raw="/w/r.raw", mode="tran",
                                 args=["-x"]) if config.SIM_CMD else (None, None)
     check("custom backend demands a configured template", custom is None,
           "PYAETHER_SIM_CMD unexpectedly set")
+    print()
+
+    # ---- 4b. custom backend: wire in any other simulator ------------------
+    print("-- 4b. custom backend drives a real simulator (the Xyce/EVAS path) --")
+    ngspice_bin = shutil.which(config.NGSPICE_BIN) or "ngspice"
+    saved_cmd, saved_env = config.SIM_CMD, config.SIM_ENV
+    try:
+        config.SIM_CMD = "%s -b -o {log} -r {raw} {netlist}" % ngspice_bin
+        # Without the ASCII switch ngspice writes a binary rawfile: the bridge
+        # must say that plainly instead of reporting an unexplained format error.
+        config.SIM_ENV = ""
+        binary_run = S.run("rc_custom.cir", backend="custom", netlist_text=RC_NETLIST,
+                           timeout=120, run_id="probe-custom-binary")
+        check("a binary rawfile from a custom tool is reported as such",
+              binary_run["ok"] is False
+              and any("binary output" in item for item in binary_run["errors"]),
+              "status=%s errors=%s" % (binary_run["status"], binary_run["errors"]))
+        check("the binary message names the fix",
+              any("SPICE_ASCIIRAWFILE" in item for item in binary_run["errors"]),
+              str(binary_run["errors"])[:200])
+
+        config.SIM_ENV = "SPICE_ASCIIRAWFILE=1"
+        custom_run = S.run("rc_custom.cir", backend="custom", netlist_text=RC_NETLIST,
+                           timeout=120, run_id="probe-custom-text")
+        check("custom backend + text output produces parsed data",
+              custom_run["ok"] is True and bool(custom_run["data"]),
+              "status=%s errors=%s" % (custom_run["status"], custom_run["errors"]))
+        check("custom backend reports the template it used",
+              "ngspice" in (custom_run["metadata"].get("command") or ""),
+              str(custom_run["metadata"].get("command"))[:160])
+    finally:
+        config.SIM_CMD, config.SIM_ENV = saved_cmd, saved_env
     print()
 
     # ---- 5. strict accessors ---------------------------------------------

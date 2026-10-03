@@ -417,6 +417,118 @@ def cmd_daemon(args):
 
 
 # --------------------------------------------------------------------------- #
+# profiles
+# --------------------------------------------------------------------------- #
+PROFILE_KEYS = ("transport", "container", "ssh_host", "ssh_port", "python",
+                "remote_dir", "license_server", "sim_target", "sim_backend",
+                "sim_ssh_host", "sim_workdir", "sim_timeout", "docs_dir")
+
+
+def _active_profile():
+    """(name, source, settings) for the profile this process resolved."""
+    config = _config()
+    settings = {}
+    name = getattr(config, "PROFILE", None)
+    if name:
+        settings = dict(config.known_profiles().get(name) or {})
+    return name, getattr(config, "PROFILE_SOURCE", ""), settings
+
+
+def _resolved_settings():
+    """Current effective values of the transport/simulator settings."""
+    config = _config()
+    env_names = {
+        "transport": "PYAETHER_TRANSPORT", "container": "PYAETHER_CONTAINER",
+        "ssh_host": "PYAETHER_SSH_HOST", "ssh_port": "PYAETHER_SSH_PORT",
+        "python": "PYAETHER_PYTHON", "remote_dir": "PYAETHER_REMOTE_DIR",
+        "license_server": "PYAETHER_LICENSE_SERVER",
+        "sim_target": "PYAETHER_SIM_TARGET", "sim_backend": "PYAETHER_SIM_BACKEND",
+        "sim_workdir": "PYAETHER_SIM_WORKDIR", "sim_timeout": "PYAETHER_SIM_TIMEOUT",
+        "sim_ssh_host": "PYAETHER_SIM_SSH_HOST",
+    }
+    return {key: config.setting(env_names.get(key, ""), key, "") for key in PROFILE_KEYS}
+
+
+def cmd_profile(args):
+    config = _config()
+    action = getattr(args, "profile_command", None) or "show"
+    name, source, settings = _active_profile()
+
+    if action == "list":
+        profiles = config.known_profiles()
+        payload = {"active": name, "source": source,
+                   "profiles": sorted(profiles)}
+
+        def human():
+            if not profiles:
+                print("no profiles defined in %s" % (config.DATA_DIR / "config.json"))
+                print("add a \"profiles\" object with named settings, then "
+                      "`%s profile bind <name>`" % PROG)
+                return
+            for profile_name in sorted(profiles):
+                mark = "*" if profile_name == name else " "
+                keys = ", ".join(sorted(profiles[profile_name]))
+                print("%s %-16s %s" % (mark, profile_name, keys))
+            if name:
+                print("\nactive: %s (%s)" % (name, source))
+        return _emit(payload, getattr(args, "json", False), human)
+
+    if action == "bind":
+        target = getattr(args, "name", None)
+        if not target:
+            raise CliError("profile bind needs a profile name",
+                           hint="run `%s profile list` to see the names." % PROG)
+        profiles = config.known_profiles()
+        if target not in profiles:
+            raise CliError("unknown profile %r" % target,
+                           hint="known profiles: %s" % (", ".join(sorted(profiles)) or "(none)"))
+        path = os.path.join(os.getcwd(), config.PROFILE_BINDING_FILENAME)
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(target + "\n")
+            written = config.find_binding(os.getcwd())
+        except OSError as exc:
+            raise CliError("cannot write %s: %s" % (path, exc))
+        payload = {"bound": target, "path": str(written or path)}
+        return _emit(payload, getattr(args, "json", False),
+                     lambda: print("bound %s to %s" % (target, path)))
+
+    if action == "clear":
+        path = config.find_binding(os.getcwd())
+        if path is None:
+            return _emit({"cleared": None}, getattr(args, "json", False),
+                         lambda: print("no profile binding in this directory tree"))
+        try:
+            os.unlink(str(path))
+        except OSError as exc:
+            raise CliError("cannot remove %s: %s" % (path, exc))
+        return _emit({"cleared": str(path)}, getattr(args, "json", False),
+                     lambda: print("cleared %s" % path))
+
+    payload = {"active": name, "source": source, "profile": settings,
+               "resolved": _resolved_settings(),
+               "binding_file": str(config.find_binding() or ""),
+               "runtime_dir": str(config.RUNTIME_DIR)}
+
+    def human_show():
+        if name:
+            print("active profile: %s (%s)" % (name, source))
+            for key in sorted(settings):
+                print("  %-16s %s" % (key, settings[key]))
+        else:
+            print("active profile: (none) -- %s" % source)
+        print("\nresolved settings:")
+        for key in PROFILE_KEYS:
+            value = payload["resolved"].get(key) or ""
+            if value:
+                print("  %-16s %s" % (key, value))
+        print("\ndaemon dir: %s" % payload["runtime_dir"])
+        if payload["binding_file"]:
+            print("binding   : %s" % payload["binding_file"])
+    return _emit(payload, getattr(args, "json", False), human_show)
+
+
+# --------------------------------------------------------------------------- #
 # simulators
 # --------------------------------------------------------------------------- #
 def _sim_summary(result):
@@ -603,6 +715,27 @@ def build_parser():
     p_daemon.add_argument("--json", action="store_true", help="print raw JSON")
     p_daemon.set_defaults(func=cmd_daemon)
 
+    p_profile = sub.add_parser("profile",
+                               help="named target profiles (one machine, several targets)")
+    profile_sub = p_profile.add_subparsers(dest="profile_command", metavar="<operation>")
+
+    p_profile_list = profile_sub.add_parser("list", help="list profiles defined in the config file")
+    p_profile_list.add_argument("--json", action="store_true", help="print raw JSON")
+    p_profile_list.set_defaults(func=cmd_profile)
+
+    p_profile_show = profile_sub.add_parser("show", help="show the active profile and resolved settings")
+    p_profile_show.add_argument("--json", action="store_true", help="print raw JSON")
+    p_profile_show.set_defaults(func=cmd_profile)
+
+    p_profile_bind = profile_sub.add_parser("bind", help="bind the current directory to a profile")
+    p_profile_bind.add_argument("name", help="profile name defined in the config file")
+    p_profile_bind.add_argument("--json", action="store_true", help="print raw JSON")
+    p_profile_bind.set_defaults(func=cmd_profile)
+
+    p_profile_clear = profile_sub.add_parser("clear", help="remove the binding file found from here")
+    p_profile_clear.add_argument("--json", action="store_true", help="print raw JSON")
+    p_profile_clear.set_defaults(func=cmd_profile)
+
     p_sim = sub.add_parser("sim", help="run SPICE netlists on a switchable simulator")
     sim_sub = p_sim.add_subparsers(dest="sim_command", metavar="<operation>")
 
@@ -614,7 +747,7 @@ def build_parser():
 
     p_sim_run = sim_sub.add_parser("run", help="run one netlist and parse the results")
     p_sim_run.add_argument("netlist", help="path of the netlist to run")
-    p_sim_run.add_argument("--backend", choices=["ngspice", "spectre", "custom"],
+    p_sim_run.add_argument("--backend", choices=["ngspice", "spectre", "alps", "custom"],
                            help="simulator backend (default PYAETHER_SIM_BACKEND)")
     p_sim_run.add_argument("--mode", help="Spectre engine/preset: aps, ax, mx, ...")
     p_sim_run.add_argument("--timeout", type=float, help="timeout in seconds (default 600)")

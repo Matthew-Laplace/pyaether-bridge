@@ -215,11 +215,29 @@ such as `db = pyAether.pyaedb`).
 
 ## Configuration resolution
 
-`config.setting(env, key, default)` resolves in three steps: **environment
-variable -> user config file -> default**. The user config file is
-`$PYAETHER_BRIDGE_HOME/config.json` (default `~/.cache/pyaether-bridge/config.json`)
-with the same snake_case keys used in the docs. That keeps local paths, container
-names and license endpoints out of the repository.
+`config.setting(env, key, default)` resolves in four steps: **environment
+variable -> active profile -> user config file -> default**. The user config
+file is `$PYAETHER_BRIDGE_HOME/config.json` (default
+`~/.cache/pyaether-bridge/config.json`) with the same snake_case keys used in
+the docs. That keeps local paths, container names and license endpoints out of
+the repository.
+
+### Profiles
+
+A profile is a named set of the same keys, so one checkout can talk to several
+installations. `config.resolve_profile()` picks the active one from:
+
+1. `PYAETHER_PROFILE`
+2. the nearest `.pyaether-profile` file (searched upwards from the current
+   directory, `PROFILE_SEARCH_DEPTH` levels); `pyaether profile bind <name>`
+   writes one
+3. `default_profile` in the config file
+4. none -- top-level config keys only
+
+When a profile is active `RUNTIME_DIR` becomes `<data dir>/profiles/<name>`, so
+the daemon socket, pid file and log are scoped to it: two profiles can never
+hand out the same session. Without a profile the paths are exactly what they
+were before, so existing setups keep working.
 
 ## CLI
 
@@ -232,6 +250,7 @@ pyaether api search QUERY [--limit N] [--kind K] [--db DB] [--json]
 pyaether api show SYMBOL [--max-chars N] [--db DB] [--json]
 pyaether api sync-live [--db DB] [--timeout S] [--json]
 pyaether daemon [start|stop|status|restart] [--json]
+pyaether profile [list|show|bind NAME|clear] [--json]
 pyaether sim backends [--probe] [--json]
 pyaether sim run NETLIST [--backend ngspice|spectre|custom] [--mode MODE]
                         [--timeout S] [--include FILE] [--run-id ID] [--json]

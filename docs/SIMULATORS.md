@@ -7,6 +7,7 @@ netlist workflow, the CLI surface, or the result format:
 | --- | --- | --- | --- |
 | `ngspice` | open source | `PYAETHER_NGSPICE_BIN` (default `ngspice`) | analysis declared in the netlist (`tran`/`ac`/`dc`/`op`/`noise`) |
 | `spectre` | commercial | `PYAETHER_SPECTRE_BIN` (default `spectre`) | `spectre`, `aps`, `x`, `cx`, `ax`, `mx`, `lx`, `vx` |
+| `alps` | commercial (Empyrean) | `PYAETHER_ALPS_BIN` (default `alps`) | `basic`, `turbo`, `pro` (accuracy levels) |
 | `custom` | any | command template in `PYAETHER_SIM_CMD` | whatever your tool takes |
 
 The point is that **the simulator does not have to be the one that ships with
@@ -149,16 +150,36 @@ export PYAETHER_SIM_CMD='ae-sim -batch -i {netlist} -o {workdir}'
 ```
 
 **Ask the tool for a text rawfile.** The parser reads ASCII; a binary rawfile
-leaves `data` empty and the run comes back as `PARTIAL` with "no parseable
-result data" (the bridge will not pretend it read numbers it did not). For
-ngspice that means adding the environment variable to the template:
+leaves `data` empty and the run comes back as `PARTIAL` (the bridge will not
+pretend it read numbers it did not). Set `PYAETHER_SIM_ENV` — it applies to
+every backend and overrides built-in defaults:
 
 ```bash
-export PYAETHER_SIM_CMD='SPICE_ASCIIRAWFILE=1 ngspice -b -o {log} -r {raw} {netlist}'
+export PYAETHER_SIM_CMD='ngspice -b -o {log} -r {raw} {netlist}'
+export PYAETHER_SIM_ENV='SPICE_ASCIIRAWFILE=1'
+./bin/pyaether sim run rc.cir --backend custom
 ```
 
-Either way the run still returns `ok`/`errors`/`artifacts`, so a tool whose
-output cannot be parsed is still reported honestly rather than silently.
+When the rawfile turns out to be binary the error says so explicitly and names
+this switch, instead of blaming the output format. Either way the run still
+returns `ok`/`errors`/`artifacts`, so a tool whose output cannot be parsed is
+reported honestly rather than silently.
+
+**3. Vendor flow (Empyrean ALPS).** The `alps` backend drives the simulator that
+Aether/MDE normally configures in the GUI, through its own batch CLI:
+
+```bash
+./bin/pyaether sim backends --probe                       # is alps on the target?
+./bin/pyaether sim run amp.sp --backend alps --mode turbo
+```
+
+Command shape: `alps -o <run>/psf -log sim.log [-mode basic|turbo|pro] [-mt N]
+<netlist>` (options and accuracy levels taken from `alps -h`). ALPS writes its
+results as PSF below `-o`; this parser reads the small text ones and otherwise
+reports `PARTIAL` with the artifact list, because the PSF layout could not be
+verified on this machine (see below). **ALPS needs a valid Empyrean licence.**
+The bridge only invokes the tool you installed and never reads, alters or works
+around licensing.
 
 **2. Add a first-class backend** in `pyaether_bridge/simulators.py`:
 
@@ -176,9 +197,20 @@ can cite -- the bridge deliberately refuses to guess flags for an unknown tool.
 `tests/simulator_probe.py` runs a real ngspice simulation of an RC low-pass and
 checks the numbers against theory (DC gain 1, -3 dB at `1/(2*pi*R*C)` =
 159.15 Hz, steeper than -15 dB roll-off), plus failure classification, Spectre
-mode construction and the strict accessors. It needs no Spectre licence and no
-network.
+mode construction, the `custom` backend driving a real tool, target resolution
+and the strict accessors. It needs no Spectre licence and no network.
 
-Not covered: a live Spectre run (the mode flags and command shape are built and
-unit-checked, but no licence was available here) and PSF parsing beyond scalar
-and vector `VALUE` records.
+`tests/alps_live_probe.py` (opt-in: `PYAETHER_ALPS_PROBE=1`) drives the vendor
+simulator through the bridge. On a machine where the vendor binary runs it
+verifies a full run; where it cannot run, the probe checks that the bridge
+reports the failure honestly and attributes it correctly (licence vs. host)
+instead of blaming the bridge or faking success.
+
+Not covered:
+
+* a live Spectre run -- the mode flags and command shape are built and
+  unit-checked, but no Spectre licence was available;
+* a completed ALPS run -- on this host the vendor binary aborts because it runs
+  under x86_64 emulation (`Exe = /run/rosetta/rosetta` in its log, no licence
+  error present), so the engine itself is untested here;
+* PSF parsing beyond scalar and vector `VALUE` records.
