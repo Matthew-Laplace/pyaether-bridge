@@ -140,7 +140,7 @@ echo 'import pyAether; print(pyAether.__file__)' | ./bin/pyaether exec
 ./bin/pyaether layout drc out.gds --rules rules.json --layers '{"m1":[1,0]}'
 ./bin/pyaether layout compare a.gds b.gds         # exit 0 = identical
 
-./bin/pyaether dsh install --profile desktop      # DeepSeek Harness plugin
+./bin/pyaether dsh install --profile <profile>    # DeepSeek Harness plugin
 ./bin/pyaether version
 ```
 
@@ -174,8 +174,8 @@ The bridge is an MCP server, and DeepSeek Harness ships an MCP client plugin, so
 it installs as a DSH plugin with one command:
 
 ```bash
-./bin/pyaether dsh install --profile desktop   # patch entry + skill, with a backup
-./bin/pyaether dsh verify --profile desktop    # prove the harness composes it
+./bin/pyaether dsh install --profile <profile>   # patch entry + skill, with a backup
+./bin/pyaether dsh verify --profile <profile>    # prove the harness composes it
 ```
 
 `--profile` defaults to `web`: pass the profile you actually run (`echo

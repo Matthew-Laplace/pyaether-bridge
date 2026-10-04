@@ -9,10 +9,10 @@ DSH plugin is one profile entry plus one skill -- no Node package of our own.
 ## Install
 
 ```bash
-./bin/pyaether dsh status --profile desktop   # installed for this profile?
-./bin/pyaether dsh patch --profile desktop    # print the patch to apply by hand
-./bin/pyaether dsh install --profile desktop  # write it, plus the skill
-./bin/pyaether dsh verify --profile desktop   # prove the harness composes it
+./bin/pyaether dsh status --profile <profile>   # installed for this profile?
+./bin/pyaether dsh patch --profile <profile>    # print the patch to apply by hand
+./bin/pyaether dsh install --profile <profile>  # write it, plus the skill
+./bin/pyaether dsh verify --profile <profile>   # prove the harness composes it
 ```
 
 `--profile` defaults to `web`, so **pass the profile you actually run**: `echo
