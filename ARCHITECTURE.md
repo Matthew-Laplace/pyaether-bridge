@@ -17,12 +17,24 @@ big picture see the [README](README.md#architecture).
 <ROOT>/pyaether_bridge/session_bridge.py   # target-side resident executor (NDJSON over stdio)
 <ROOT>/pyaether_bridge/cli.py              # command line entry point
 <ROOT>/pyaether_bridge/mcp_server.py       # MCP stdio server
+<ROOT>/pyaether_bridge/layout.py           # KLayout layer (gen/info/drc/boolean/tools/convert/compare/deck)
+<ROOT>/pyaether_bridge/klayout_script.py   # target-side KLayout script, deployed by layout.py
+<ROOT>/pyaether_bridge/schematic.py        # schematic round trip: canvas <-> Aether
+<ROOT>/pyaether_bridge/sch_build_script.py # target-side: snapshot -> real schematic
+<ROOT>/pyaether_bridge/sch_snapshot_script.py # target-side: real schematic -> snapshot
+<ROOT>/pyaether_bridge/dsh.py              # DeepSeek Harness integration (MCP row + skill)
 <ROOT>/bin/pyaether                        # CLI launcher shim
 <ROOT>/bin/pyaether-mcp                    # MCP launcher shim
 <ROOT>/tests/smoke_cli.sh                  # CLI smoke test (needs no Docker)
 <ROOT>/tests/mcp_probe.py                  # MCP protocol and tool probe
 <ROOT>/tests/transport_probe.py            # transport probe (local + fake ssh stub + optional docker)
 <ROOT>/tests/simulator_probe.py            # simulator probe (real ngspice + contract checks)
+<ROOT>/tests/layout_probe.py               # KLayout layer probe
+<ROOT>/tests/schematic_probe.py            # schematic round-trip probe
+<ROOT>/tests/profile_probe.py              # target profile + vendor backend probe
+<ROOT>/tests/dsh_probe.py                  # DeepSeek Harness integration probe
+<ROOT>/tests/alps_live_probe.py            # vendor simulator live probe (needs ALPS + a licence)
+<ROOT>/integrations/dsh/skills/pyaether-bridge/SKILL.md  # model-facing tool guide, installed by dsh.py
 <ROOT>/data/catalog.sqlite                 # local build artifact, not in git
 ```
 
@@ -181,6 +193,72 @@ When the daemon is not running `request()` starts it automatically; set
 once and only when **no request has been sent yet**, so `exec_code` is never
 silently replayed.
 
+## layout.py
+
+KLayout work stays out of process, which keeps the standard-library-only rule
+intact and KLayout a separate, user-installed tool. `layout.py` builds a KLayout
+script (`klayout_script.py`), deploys it over the transport, runs
+`klayout -b -r <script>` with the `pya` module KLayout ships, and reads back a
+JSON report -- nothing is parsed from stdout, so KLayout's log noise can never be
+mistaken for a result.
+
+```python
+def probe() -> dict                        # is KLayout there, and which version
+def generate(spec, *, output, timeout)     # spec -> GDS2/OASIS
+def info(path, *, layers)                  # cells, layers, shape counts, extents
+def drc(path, rules, *, layers)            # width/space/notch/enclosing/area
+def boolean(op, a, b, ...)                 # merge/and/not/xor/size
+def tools()                                # KLayout's standalone stream tools
+def convert(source, output, *, tool)       # strm2oas/strm2gds/strm2cif/strmclip/...
+def compare(a, b, *, tool)                 # strmcmp / strmxor
+def deck(script, *, source, top, define)   # a real .drc / .lvs rule deck
+```
+
+Layer names are resolved through a caller-supplied map, because GDS2 stores no
+layer names; a name that cannot be resolved is an error, never "0 violations". A
+deck that runs but writes no report database is reported as `PARTIAL`, not as
+"design rule clean".
+
+## schematic.py
+
+The round trip between a canvas drawing and a real schematic. The interchange
+format is the `analog-agent.schematic` snapshot (instances / nets / terminals),
+which the forward Aether -> canvas importers already speak, so both directions
+exist: `build` creates a schematic through pyAether's own creation API
+(`emyBlock.create`, `emyScalarInst.create`, `emyScalarNet.create`,
+`emyInstTerm.create`, `emyTerm.create`, then `design.save`), and `snapshot` reads
+one back out.
+
+- The spec and the report travel as files, so no user text is ever interpolated
+  into generated code.
+- A missing target library is created with `dbCreateLib`; an existing cell is
+  never overwritten -- each already-existing instance is reported instead.
+- `netlist` emits SPICE offline (no session needed) and states in the header
+  whether the deck is positional or a connectivity edge list, rather than
+  silently shuffling nodes when pin order is unknown.
+- Target-side helpers: `sch_build_script.py`, `sch_snapshot_script.py`.
+
+## dsh.py
+
+DeepSeek Harness integration. `dsh` composes a profile from plugin bundles and
+ships an MCP client plugin (`@deepseek-ai/dsh-mcp-client`), so "use this bridge
+as a DSH plugin" means one loader entry plus the matching skill -- the MCP server
+is not replaced, it is registered.
+
+- `install` appends an `- insert:` item to
+  `<DSH_HOME>/profiles/<profile>/cordis.patch.yml` (a bare `- id:` line would be
+  a patch aimed at a row that does not exist yet and is silently dropped) and
+  copies `integrations/dsh/skills/pyaether-bridge/SKILL.md` to
+  `<DSH_HOME>/skills/`. The previous patch file is backed up first.
+- The entry raises `toolCallTimeoutMs` from the client's 60 s default to 30 min
+  (a simulation or a layout job legitimately runs for minutes) and spells out an
+  absolute interpreter plus launcher path, because the harness starts the server
+  from its own working directory with `PYTHONPATH` scrubbed.
+- `verify` runs `dsh --profile <profile> --dump-config` to prove the harness
+  really composes the entry, rather than trusting that the YAML was accepted.
+- Two separate targets: the patch layer is per profile, the skill is global. The
+  `--profile` default is `web`, so pass the profile you actually run.
+
 ## Daemon and session protocol
 
 Both hops speak NDJSON (one JSON object per line).
@@ -254,6 +332,10 @@ pyaether profile [list|show|bind NAME|clear] [--json]
 pyaether sim backends [--probe] [--json]
 pyaether sim run NETLIST [--backend ngspice|spectre|custom] [--mode MODE]
                         [--timeout S] [--include FILE] [--run-id ID] [--json]
+pyaether layout probe|gen|info|drc|boolean|tools|convert|compare|deck [--json]
+pyaether sch snapshot|build|netlist|roundtrip [--json]
+pyaether dsh status|patch|install|uninstall|verify [--profile P] [--dsh-home DIR]
+                        [--dry-run] [--json]
 pyaether version
 ```
 
@@ -274,7 +356,20 @@ with `{"content": [...], "isError": true}` instead of a protocol error.
 | Tool | inputSchema |
 | --- | --- |
 | `pyaether_status` | `{}` |
-| `pyaether_api_search` | `{query: str(required), limit?: int=20, kind?: str}` |
-| `pyaether_api_help` | `{symbol: str(required), max_chars?: int=4000}` |
-| `pyaether_exec` | `{code: str(required), timeout?: number=120}` |
-| `pyaether_sim_run` | `{netlist: str(required), backend?: "ngspice"|"spectre"|"custom", mode?: str, timeout?: number=600}` |
+| `pyaether_api_search` | `{query: string, limit?: integer, kind?: string}` |
+| `pyaether_api_help` | `{symbol: string, max_chars?: integer}` |
+| `pyaether_exec` | `{code: string, timeout?: number}` |
+| `pyaether_sim_run` | `{netlist: string, backend?: string, mode?: string, timeout?: number}` |
+| `pyaether_layout_gen` | `{spec: object, output?: string, timeout?: number}` |
+| `pyaether_layout_info` | `{path: string, layers?: object, timeout?: number}` |
+| `pyaether_layout_drc` | `{path: string, rules: array, layers?: object, timeout?: number}` |
+| `pyaether_layout_boolean` | `{op: string, a: string, b?: string, value?: number, out_layer: string, source?: string, output?: string, layers?: object, timeout?: number}` |
+| `pyaether_layout_convert` | `{source: string, output: string, tool?: string, timeout?: number}` |
+| `pyaether_layout_compare` | `{a: string, b: string, tool?: string, timeout?: number}` |
+| `pyaether_layout_deck` | `{script: string, source?: string, top?: string, define?: array, timeout?: number}` |
+| `pyaether_sch_build` | `{spec: object, library?: string, cell?: string, view?: string, timeout?: number}` |
+| `pyaether_sch_netlist` | `{spec: object, subckt?: string, schematic_library?: string, cell?: string}` |
+
+The schemas are defined once in `TOOLS` (`pyaether_bridge/mcp_server.py`, 14
+tools); the model-facing summary of when to use each one is
+`integrations/dsh/skills/pyaether-bridge/SKILL.md`.

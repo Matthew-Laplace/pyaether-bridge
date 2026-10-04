@@ -1,14 +1,15 @@
 ---
 name: pyaether-bridge
-description: "Drive Empyrean Aether/PyAether, SPICE simulators (ngspice, Spectre/APS, Empyrean ALPS) and KLayout layouts through the pyaether-bridge MCP tools. Use when a task needs to run Python inside a live pyAether session, look up a PyAether API signature, run a netlist on a chosen simulator, or generate/inspect/check a GDS or OASIS layout."
-whenToUse: "The task involves Aether/PyAether automation, SPICE simulation from a netlist, or KLayout layout generation and design-rule checks, and the pyaether MCP tools (mcp__pyaether__*) are available."
+description: "Drive Empyrean Aether/PyAether, SPICE simulators (ngspice, Spectre/APS, Empyrean ALPS), schematic round trips (canvas drawing <-> Aether schematic) and KLayout layouts through the pyaether-bridge MCP tools. Use when a task needs to run Python inside a live pyAether session, look up a PyAether API signature, run a netlist on a chosen simulator, turn a canvas drawing into an Aether schematic (or read one back), or generate/inspect/check/convert/compare a GDS or OASIS layout."
+whenToUse: "The task involves Aether/PyAether automation, SPICE simulation from a netlist, schematic round trip between a canvas and Aether, or KLayout layout generation and design-rule checks, and the pyaether MCP tools (mcp__pyaether__*) are available."
 ---
 
 # pyaether-bridge
 
 The bridge keeps one pyAether session alive on a target (a container, a server
-over SSH, or this machine) and exposes it, plus a simulator layer and a KLayout
-layout layer, as MCP tools. Tools arrive as `mcp__pyaether__<name>`.
+over SSH, or this machine) and exposes it, plus a simulator layer, a schematic
+round-trip layer and a KLayout layout layer, as MCP tools. Tools arrive as
+`mcp__pyaether__<name>`.
 
 ## Tools
 
@@ -23,6 +24,11 @@ layout layer, as MCP tools. Tools arrive as `mcp__pyaether__<name>`.
 | `pyaether_layout_info` | Read a layout: cells, layers, shape counts, instances, extents. |
 | `pyaether_layout_drc` | Run width / space / notch / enclosing / area checks. |
 | `pyaether_layout_boolean` | Layer algebra: merge, and, not, xor, size. |
+| `pyaether_layout_convert` | Convert or clip a layout with KLayout's stream tools (the output suffix picks the format). |
+| `pyaether_layout_compare` | Compare (`strmcmp`) or XOR (`strmxor`) two layouts; `data.identical` is the answer, not the log text. |
+| `pyaether_layout_deck` | Run a KLayout rule deck (`.drc` / `.lvs`) through the real engine. |
+| `pyaether_sch_build` | Turn a canvas drawing or snapshot into a real Aether schematic. |
+| `pyaether_sch_netlist` | Emit SPICE text from a snapshot's connectivity (works without a live session). |
 
 ## Rules that keep results honest
 
@@ -42,6 +48,9 @@ layout layer, as MCP tools. Tools arrive as `mcp__pyaether__<name>`.
 6. **Targets are independent.** PyAether, the simulator and KLayout may each run
    somewhere different (container / server / this machine). If a tool says the
    binary is missing, check which target it resolved before installing anything.
+7. **A deck that runs but writes no report is `PARTIAL`.** That is not "design
+   rule clean": read the deck's exit code and report database before you report
+   success.
 
 ## Typical sequences
 
@@ -67,6 +76,19 @@ layout layer, as MCP tools. Tools arrive as `mcp__pyaether__<name>`.
 2. `pyaether_layout_info` to confirm what was written (shape counts, extents).
 3. `pyaether_layout_drc` with rules such as
    `{name: "m1 width", check: "width", layer: "m1", value: 0.2}`.
+4. `pyaether_layout_convert` to hand a different format to the next tool;
+   `pyaether_layout_compare` against a golden file (`data.identical`);
+   `pyaether_layout_deck` when the real rule deck, not the built-in checks, is
+   the authority.
+
+**Draw a schematic in a canvas, then put it in Aether**
+
+1. `pyaether_sch_netlist` on the snapshot first — connectivity errors show up
+   offline, before anything is written into a library.
+2. `pyaether_sch_build` with the snapshot or canvas document; it creates a
+   missing library and never overwrites an existing cell.
+3. Read `ok` and the per-instance "already exists" notes: a cell that was
+   already present is reported, not silently replaced.
 
 ## Failure handling
 

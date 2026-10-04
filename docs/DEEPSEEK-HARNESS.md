@@ -9,11 +9,17 @@ DSH plugin is one profile entry plus one skill -- no Node package of our own.
 ## Install
 
 ```bash
-./bin/pyaether dsh status                 # installed for the active profile?
-./bin/pyaether dsh patch                  # print the patch to apply by hand
-./bin/pyaether dsh install --profile web  # write it, plus the skill
-./bin/pyaether dsh verify --profile web   # prove the harness composes it
+./bin/pyaether dsh status --profile desktop   # installed for this profile?
+./bin/pyaether dsh patch --profile desktop    # print the patch to apply by hand
+./bin/pyaether dsh install --profile desktop  # write it, plus the skill
+./bin/pyaether dsh verify --profile desktop   # prove the harness composes it
 ```
+
+`--profile` defaults to `web`, so **pass the profile you actually run**: `echo
+$DSH_PROFILE` prints its name and `$DSH_PROFILE_DIR` its directory. Installing
+into a profile the harness never loads looks successful and changes nothing. The
+patch entry is per profile; the skill is written once, to
+`<dsh-home>/skills/pyaether-bridge/SKILL.md`.
 
 `--dsh-home` overrides `$DSH_HOME` (default `~/.dsh`); that is how the test suite
 exercises this without touching your real configuration.
