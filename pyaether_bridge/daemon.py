@@ -18,6 +18,7 @@ import re
 import select
 import shlex
 import signal
+import socket
 import socketserver
 import subprocess
 import sys
@@ -79,6 +80,112 @@ def probe_target(timeout=None):
         raise BridgeError(str(exc))
     result["transport"] = target.label()
     return result
+
+
+# Aether installs are named Aether_<version>...; the interpreter path a probe
+# returns carries that name, so the version can be read without another call.
+_VERSION_RE = re.compile(r"Aether_([0-9][^/]*)")
+
+
+def observed_identity():
+    """What the target reports it is, using the probe (plus one SSH hostname call).
+
+    Everything here is *observed*; comparing it with the configured
+    ``expected_*`` values is :func:`identity_report`'s job.
+    """
+    target = transport_info()
+    try:
+        info = target.probe()
+    except transports.TransportError as exc:
+        raise BridgeError(str(exc))
+    observed = {
+        "hostname": "",
+        "container": "",
+        "image": "",
+        "aether_version": "",
+        "license_server": config.LICENSE_SERVER or "",
+        "transport": target.label(),
+        "reachable": bool(info.get("reachable")),
+        "python": info.get("python") or "",
+        "detail": info.get("detail") or "",
+    }
+    if config.TRANSPORT == "docker":
+        entry = (info.get("targets") or {}).get(config.CONTAINER) or {}
+        observed["container"] = config.CONTAINER
+        observed["image"] = entry.get("image") or ""
+    elif config.TRANSPORT == "ssh":
+        observed["hostname"] = config.SSH_HOST or ""
+        try:
+            result = target.run_command("hostname", timeout=15.0)
+            name = str((result or {}).get("stdout") or "").strip()
+            if name:
+                observed["hostname"] = name
+        except (transports.TransportError, KeyError, AttributeError):
+            pass
+    else:
+        observed["hostname"] = socket.gethostname()
+    match = _VERSION_RE.search(observed["python"])
+    if match:
+        observed["aether_version"] = match.group(1)
+    return observed
+
+
+def identity_report():
+    """Compare the configured expectations with what the target reports.
+
+    A *declared* expectation that cannot be observed is a failure, not a pass:
+    the point of the check is to catch a wrong target, and "could not verify" is
+    exactly the state in which a wrong target would slip through.
+    """
+    observed = {}
+    error = ""
+    try:
+        observed = observed_identity()
+    except BridgeError as exc:
+        error = str(exc)
+    checks = []
+    for field in config.IDENTITY_FIELDS:
+        expected = str(config.EXPECTED_IDENTITY.get(field) or "")
+        got = str(observed.get(field) or "")
+        if not expected:
+            state = "unconfigured"
+        elif not got:
+            state = "unverifiable"
+        elif expected == got:
+            state = "match"
+        else:
+            state = "mismatch"
+        checks.append({"field": field, "expected": expected, "observed": got,
+                       "state": state})
+    blocking = [check for check in checks if check["state"] in ("mismatch", "unverifiable")]
+    return {
+        "ok": not blocking and not error,
+        "identity_configured": config.EXPECTED_IDENTITY_ACTIVE,
+        "checks": checks,
+        "blocking": blocking,
+        "observed": observed,
+        "error": error,
+        "override": config.ALLOW_IDENTITY_MISMATCH,
+        "fingerprint": config.TARGET_FINGERPRINT,
+        "profile": config.PROFILE,
+        "profile_source": config.PROFILE_SOURCE,
+    }
+
+
+def identity_error_text(report):
+    """One actionable sentence for a failed identity check."""
+    parts = []
+    for check in report["blocking"]:
+        if check["state"] == "mismatch":
+            parts.append("%s is %r but %r was expected"
+                         % (check["field"], check["observed"], check["expected"]))
+        else:
+            parts.append("%s should be %r but the target did not report it"
+                         % (check["field"], check["expected"]))
+    detail = "; ".join(parts) or report.get("error") or "identity check failed"
+    return ("target identity check failed for profile %r: %s. Point the profile at "
+            "the right target, or set PYAETHER_ALLOW_IDENTITY_MISMATCH=1 if this "
+            "cross-target use is intentional." % (config.PROFILE, detail))
 
 
 class LineReader:
@@ -364,6 +471,9 @@ class BridgeServer(socketserver.ThreadingUnixStreamServer):
         self.session = Session()
         self.started_at = time.time()
         self.last_error = None
+        # One identity check per daemon: it runs before the first write into the
+        # live session, and is not repeated per request.
+        self.identity_checked = False
 
     # ---- method dispatch ------------------------------------------------
     def dispatch(self, request):
@@ -419,6 +529,7 @@ class BridgeServer(socketserver.ThreadingUnixStreamServer):
                 "socket": str(config.DAEMON_SOCK),
                 "uptime_s": round(time.time() - self.started_at, 1),
                 "log": str(config.DAEMON_LOG),
+                "fingerprint": config.TARGET_FINGERPRINT,
             },
             "session": self.session.info(),
             "namespace_keys": keys,
@@ -446,6 +557,28 @@ class BridgeServer(socketserver.ThreadingUnixStreamServer):
             timeout = 120.0
         if timeout <= 0:
             timeout = 120.0
+        # First write into the live session: assert the target is the one the
+        # profile claims, instead of discovering it afterwards. Skipped entirely
+        # when no expected_* value is configured, so it costs nothing by default.
+        if not self.identity_checked:
+            self.identity_checked = True
+            if config.EXPECTED_IDENTITY_ACTIVE:
+                report = identity_report()
+                if not report["ok"] and not config.ALLOW_IDENTITY_MISMATCH:
+                    self.last_error = identity_error_text(report)
+                    return {
+                        "ok": False,
+                        "stdout": "",
+                        "stderr": "",
+                        "result_repr": None,
+                        "result_json": None,
+                        "elapsed_s": 0.0,
+                        "timed_out": False,
+                        "error": self.last_error,
+                        "error_type": "IdentityMismatch",
+                        "namespace_new": 0,
+                        "identity": report,
+                    }
         started = time.time()
         try:
             response = self.session.call(
@@ -503,6 +636,11 @@ class _Handler(socketserver.StreamRequestHandler):
         self._reply(response)
 
     def _reply(self, payload):
+        # Every reply carries the target fingerprint: a client that resolved a
+        # different target must not be served by this daemon, and checking on
+        # each reply is cheaper and safer than trusting a stale on-disk marker.
+        if isinstance(payload, dict):
+            payload.setdefault("fingerprint", config.TARGET_FINGERPRINT)
         data = (json.dumps(payload, ensure_ascii=False, default=str) + "\n").encode("utf-8")
         try:
             self.wfile.write(data)
@@ -512,8 +650,12 @@ class _Handler(socketserver.StreamRequestHandler):
 
 
 def _lock_daemon():
+    # One lock per profile, next to that profile's socket. A global lock would
+    # let the first profile's daemon block every other profile's daemon from
+    # starting, even though each profile has its own session and target.
+    config.RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    handle = open(config.DATA_DIR / "daemon.lock", "a+")
+    handle = open(config.DAEMON_LOCK, "a+")
     try:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -525,7 +667,8 @@ def _lock_daemon():
 def serve(start_timeout=DEFAULT_START_TIMEOUT):
     lock = _lock_daemon()
     if lock is None:
-        _log("another daemon is already running; this start exits")
+        _log("another daemon is already running for profile %r; this start exits"
+             % config.PROFILE)
         return 0
     socket_path = config.DAEMON_SOCK
     if socket_path.exists():

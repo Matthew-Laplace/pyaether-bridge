@@ -313,9 +313,77 @@ installations. `config.resolve_profile()` picks the active one from:
 4. none -- top-level config keys only
 
 When a profile is active `RUNTIME_DIR` becomes `<data dir>/profiles/<name>`, so
-the daemon socket, pid file and log are scoped to it: two profiles can never
-hand out the same session. Without a profile the paths are exactly what they
-were before, so existing setups keep working.
+the daemon socket, startup lock, pid file and log are scoped to it: two profiles
+can never hand out the same session. Without a profile the paths are exactly what
+they were before, so existing setups keep working.
+
+### Target-side paths are namespaced too
+
+`config.scoped_path()` appends `-<profile>` to the *defaults* of `REMOTE_DIR`,
+`SIM_WORKDIR`, `LAYOUT_WORKDIR` and `SCHEMATIC_WORKDIR`. A shared
+`/tmp/pyaether-bridge` would let one profile overwrite another's deployed
+`session_bridge.py`, and would mix staged netlists and layouts between targets.
+An explicitly configured value is never rewritten, and with no active profile the
+paths keep their historical values.
+
+### Version-dependent artifacts
+
+The symbol catalog is built from one installation's docs, so it is a
+version-dependent artifact:
+
+```python
+AETHER_VERSION = setting("PYAETHER_AETHER_VERSION", "aether_version")
+CATALOG_DB     = catalog_db_path()   # env > profile > per-(profile, version) file > repo default
+```
+
+Declaring `aether_version` keys the catalog to
+`<data dir>/profiles/<name>/catalog-<version>.sqlite`; without it the historical
+single catalog is kept. `resolve_docs_dir()` is the strict sibling of
+`find_docs_dir()`: a pinned `docs_dir` must be usable, and when several installed
+Aether trees are present and nothing is pinned it raises `ConfigError` naming the
+installations instead of picking one. `api build` uses the strict form. A
+`docs_dir` inside a profile block is honoured -- it used to be read from the
+top-level config only, so every profile silently built from the same
+installation's docs.
+
+### Target identity
+
+A profile names a target; `expected_*` values assert *which* target it is:
+
+```python
+IDENTITY_FIELDS = ("hostname", "container", "image", "aether_version", "license_server")
+EXPECTED_IDENTITY = {field: setting("PYAETHER_EXPECTED_<FIELD>", "expected_<field>")}
+```
+
+`daemon.observed_identity()` gathers what the target reports (the transport probe
+plus one SSH `hostname` call), `identity_report()` classifies each field as
+`match` / `mismatch` / `unverifiable` / `unconfigured`, and the daemon runs the
+check once before the first `exec` into the live session. Two deliberate choices:
+
+* a *declared* expectation that cannot be observed is **blocking**, not a pass --
+  "could not verify" is exactly the state in which a wrong target slips through;
+* `PYAETHER_ALLOW_IDENTITY_MISMATCH=1` turns a mismatch into a warning, so an
+  intentional cross-target session stays possible.
+
+`profile verify` runs the same check on demand and reports the truth even when
+the override is set; the override only decides whether *writes* are refused.
+
+### Explicit-profile guard and the target fingerprint
+
+`PYAETHER_REQUIRE_EXPLICIT_PROFILE=1` makes commands that act on a target require
+the profile to be named by this process. `config.profile_is_confirmed()` is true
+only for `PYAETHER_PROFILE`: a binding file or `default_profile` selects a target
+but is not a confirmation for the current command. `runtime.exec_code()` enforces
+it for `exec` (shared with the MCP server) and `cli.WRITE_COMMANDS` covers the
+rest; read-only commands are never blocked.
+
+Every daemon reply carries `config.TARGET_FINGERPRINT`, a hash of the resolved
+target settings. The client checks it on session methods (`exec`, `namespace`)
+and refuses with `BridgeStaleDaemon`: a daemon started for another target must not
+answer a session call, and the message names `daemon restart` as the fix. Control
+methods (`ping`, `status`, `stop`, `restart`) deliberately skip the check --
+otherwise the user could not stop the very daemon they were told to restart.
+`status` reports the comparison as data instead of raising.
 
 ## CLI
 
@@ -328,7 +396,7 @@ pyaether api search QUERY [--limit N] [--kind K] [--db DB] [--json]
 pyaether api show SYMBOL [--max-chars N] [--db DB] [--json]
 pyaether api sync-live [--db DB] [--timeout S] [--json]
 pyaether daemon [start|stop|status|restart] [--json]
-pyaether profile [list|show|bind NAME|clear] [--json]
+pyaether profile [list|show|bind NAME|clear|verify] [--json]
 pyaether sim backends [--probe] [--json]
 pyaether sim run NETLIST [--backend ngspice|spectre|custom] [--mode MODE]
                         [--timeout S] [--include FILE] [--run-id ID] [--json]
@@ -342,6 +410,9 @@ pyaether version
 Exit codes: `0` success; `1` runtime failure (exec raised, catalog missing, ...);
 `2` usage error. Human-readable output is English; `--json` prints raw JSON.
 `sim run` exits `1` whenever the simulation result is not `ok`.
+`profile verify` exits `1` when a declared identity mismatches or cannot be
+verified, and `0` when nothing is declared. A command refused by
+`PYAETHER_REQUIRE_EXPLICIT_PROFILE` exits `1`.
 
 ## MCP server
 

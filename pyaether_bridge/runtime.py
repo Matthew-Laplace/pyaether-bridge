@@ -29,6 +29,17 @@ class BridgeNotRunning(BridgeError):
     """The daemon is not running: the unix socket cannot be connected."""
 
 
+class BridgeStaleDaemon(BridgeError):
+    """A daemon is running that serves a different target than this process resolved."""
+
+
+# Methods that use the resident session, so a daemon serving another target must
+# not answer them. Control methods (ping / status / stop / restart) stay usable:
+# they are how a stale daemon gets diagnosed and cleared, and refusing to stop it
+# would leave the user stuck with the very daemon they were told to restart.
+SESSION_METHODS = ("exec", "namespace")
+
+
 def _readline(sock, deadline):
     buffer = bytearray()
     while True:
@@ -48,7 +59,7 @@ def _readline(sock, deadline):
         buffer.extend(chunk)
 
 
-def _call_once(method, params, timeout):
+def _call_once(method, params, timeout, *, check_target=False):
     payload = (
         json.dumps({"id": 1, "method": method, "params": params or {}}, ensure_ascii=False) + "\n"
     ).encode("utf-8")
@@ -70,6 +81,16 @@ def _call_once(method, params, timeout):
         raise BridgeError("daemon returned invalid JSON: %r" % line[:200])
     if not isinstance(response, dict):
         raise BridgeError("daemon returned an unexpected JSON type: %s" % type(response).__name__)
+    if check_target:
+        served = response.get("fingerprint")
+        if served and served != config.TARGET_FINGERPRINT and not config.ALLOW_STALE_DAEMON:
+            raise BridgeStaleDaemon(
+                "a daemon is running for a different target than this process "
+                "resolved (daemon %s, this process %s). The active profile %r "
+                "changed target while that daemon kept running, so its session "
+                "belongs to the old one. Run `pyaether daemon restart` to pick up "
+                "the new target, or set PYAETHER_ALLOW_STALE_DAEMON=1."
+                % (served, config.TARGET_FINGERPRINT, config.PROFILE))
     return response
 
 
@@ -81,6 +102,10 @@ def daemon_pid():
 
 
 def _spawn_daemon():
+    # The runtime dir is per profile, so it must be created before the log is
+    # opened: with a profile active DATA_DIR alone is not enough, and the daemon
+    # used to fail with FileNotFoundError on its own log file.
+    config.RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     handle = open(config.DAEMON_LOG, "ab")
     root = str(config.PROJECT_DIR)
@@ -216,13 +241,14 @@ def stop_daemon():
 def request(method, params=None, *, timeout=30.0, autostart=True):
     """Send one method call to the daemon and return the raw response dict."""
     allow_start = bool(autostart) and not config.NO_AUTOSTART
+    check_target = method in SESSION_METHODS
     try:
-        return _call_once(method, params, timeout)
+        return _call_once(method, params, timeout, check_target=check_target)
     except BridgeNotRunning:
         if not allow_start:
             raise
     ensure_daemon()
-    return _call_once(method, params, timeout)
+    return _call_once(method, params, timeout, check_target=check_target)
 
 
 def exec_code(code, *, timeout=120.0, autostart=True):
@@ -235,6 +261,9 @@ def exec_code(code, *, timeout=120.0, autostart=True):
     """
     if not isinstance(code, str) or not code.strip():
         raise ValueError("code must be a non-empty string")
+    refusal = config.profile_confirmation_error("`pyaether exec`")
+    if refusal:
+        raise BridgeError(refusal)
     timeout = float(timeout or 120.0)
     response = request("exec", {"code": code, "timeout": timeout}, timeout=timeout + 60.0, autostart=autostart)
     if "ok" not in response:
@@ -263,6 +292,7 @@ def _offline_status(reason):
             "socket": str(config.DAEMON_SOCK),
             "uptime_s": None,
             "log": str(config.DAEMON_LOG),
+            "fingerprint": None,
         },
         "session": {
             "ready": False,
@@ -276,6 +306,30 @@ def _offline_status(reason):
         },
         "namespace_keys": [],
         "last_error": probe_error or reason,
+        "target": target_state(None),
+        "profile": profile_state(),
+    }
+
+
+def target_state(served_fingerprint):
+    """The resolved target, its fingerprint, and whether a daemon matches it."""
+    resolved = config.TARGET_FINGERPRINT
+    served = served_fingerprint or ""
+    return {
+        "resolved_fingerprint": resolved,
+        "daemon_fingerprint": served or None,
+        "matches": (not served) or served == resolved,
+        "override": config.ALLOW_STALE_DAEMON,
+    }
+
+
+def profile_state():
+    """Where the active profile came from, and whether that counts as named."""
+    return {
+        "name": config.PROFILE,
+        "source": config.PROFILE_SOURCE,
+        "confirmed": config.profile_is_confirmed(),
+        "require_explicit": config.REQUIRE_EXPLICIT_PROFILE,
     }
 
 
@@ -287,12 +341,15 @@ def status(*, autostart=False):
         return _offline_status(str(exc))
     if not response.get("ok"):
         raise BridgeError(response.get("error") or "status call failed")
+    daemon = response.get("daemon", {})
     return {
         "transport": response.get("transport", {}),
-        "daemon": response.get("daemon", {}),
+        "daemon": daemon,
         "session": response.get("session", {}),
         "namespace_keys": response.get("namespace_keys", []),
         "last_error": response.get("last_error"),
+        "target": target_state(daemon.get("fingerprint")),
+        "profile": profile_state(),
     }
 
 

@@ -371,7 +371,12 @@ def cmd_exec(args):
 def cmd_api_build(args):
     catalog = _catalog()
     config = _config()
-    docs = args.docs or config.find_docs_dir()
+    try:
+        docs = args.docs or config.resolve_docs_dir()
+    except config.ConfigError as exc:
+        raise CliError(str(exc),
+                       hint="pin `docs_dir` in the profile, pass `--docs DIR`, or "
+                            "set PYAETHER_DOCS_DIR.")
     if not docs:
         raise CliError(
             "cannot find the PyAether documentation directory (docs/html).",
@@ -530,8 +535,9 @@ def cmd_daemon(args):
 # profiles
 # --------------------------------------------------------------------------- #
 PROFILE_KEYS = ("transport", "container", "ssh_host", "ssh_port", "python",
-                "remote_dir", "license_server", "sim_target", "sim_backend",
-                "sim_ssh_host", "sim_workdir", "sim_timeout", "docs_dir")
+                "remote_dir", "license_server", "aether_version", "sim_target",
+                "sim_backend", "sim_ssh_host", "sim_workdir", "sim_timeout",
+                "layout_workdir", "sch_workdir")
 
 
 def _active_profile():
@@ -545,18 +551,18 @@ def _active_profile():
 
 
 def _resolved_settings():
-    """Current effective values of the transport/simulator settings."""
+    """Effective values, after env > active profile > config > default.
+
+    Read off the config module rather than re-resolving each key, so what is
+    printed is what the bridge will actually use -- including the profile-scoped
+    scratch paths.
+    """
     config = _config()
-    env_names = {
-        "transport": "PYAETHER_TRANSPORT", "container": "PYAETHER_CONTAINER",
-        "ssh_host": "PYAETHER_SSH_HOST", "ssh_port": "PYAETHER_SSH_PORT",
-        "python": "PYAETHER_PYTHON", "remote_dir": "PYAETHER_REMOTE_DIR",
-        "license_server": "PYAETHER_LICENSE_SERVER",
-        "sim_target": "PYAETHER_SIM_TARGET", "sim_backend": "PYAETHER_SIM_BACKEND",
-        "sim_workdir": "PYAETHER_SIM_WORKDIR", "sim_timeout": "PYAETHER_SIM_TIMEOUT",
-        "sim_ssh_host": "PYAETHER_SIM_SSH_HOST",
-    }
-    return {key: config.setting(env_names.get(key, ""), key, "") for key in PROFILE_KEYS}
+    values = {}
+    for key in PROFILE_KEYS:
+        value = getattr(config, key.upper(), "")
+        values[key] = "" if value is None else str(value)
+    return values
 
 
 def cmd_profile(args):
@@ -615,14 +621,75 @@ def cmd_profile(args):
         return _emit({"cleared": str(path)}, getattr(args, "json", False),
                      lambda: print("cleared %s" % path))
 
+    if action == "verify":
+        from . import daemon as daemon_module
+
+        try:
+            report = daemon_module.identity_report()
+        except Exception as exc:  # a probe that cannot answer is a failed check, not a crash
+            raise CliError("identity check could not run: %s" % exc)
+        state = _runtime().status(autostart=False)
+        payload = {
+            "active": name, "source": source,
+            "confirmed": config.profile_is_confirmed(),
+            "require_explicit": config.REQUIRE_EXPLICIT_PROFILE,
+            "identity": report,
+            "target": state.get("target"),
+            "daemon": state.get("daemon"),
+        }
+
+        def human_verify():
+            print("profile     : %s (%s)%s"
+                  % (name or "(none)", source,
+                     " [confirmed]" if payload["confirmed"] else ""))
+            print("fingerprint : %s" % report["fingerprint"])
+            target = payload.get("target") or {}
+            if target.get("daemon_fingerprint"):
+                print("daemon      : %s (%s)" % (
+                    target["daemon_fingerprint"],
+                    "serves this target" if target.get("matches")
+                    else "STALE -- serves another target; run `%s daemon restart`" % PROG))
+            else:
+                print("daemon      : not running")
+            if not report["identity_configured"]:
+                print("\nno expected_* values are configured, so nothing is asserted.")
+                print("add expected_hostname / expected_container / expected_image /")
+                print("expected_aether_version / expected_license_server to the profile.")
+                return
+            print("\nidentity check:")
+            for check in report["checks"]:
+                if check["state"] == "unconfigured":
+                    continue
+                print("  %-18s %-13s expected=%s observed=%s"
+                      % (check["field"], check["state"],
+                         check["expected"] or "-", check["observed"] or "-"))
+            if report["error"]:
+                print("  probe error: %s" % report["error"])
+            if report["ok"]:
+                print("\nidentity OK")
+            else:
+                print("\n%s" % daemon_module.identity_error_text(report))
+
+        _emit(payload, getattr(args, "json", False), human_verify)
+        return 0 if (report["ok"] or not report["identity_configured"]) else 1
+
     payload = {"active": name, "source": source, "profile": settings,
                "resolved": _resolved_settings(),
                "binding_file": str(config.find_binding() or ""),
-               "runtime_dir": str(config.RUNTIME_DIR)}
+               "runtime_dir": str(config.RUNTIME_DIR),
+               "confirmed": config.profile_is_confirmed(),
+               "require_explicit": config.REQUIRE_EXPLICIT_PROFILE,
+               "catalog_db": str(config.CATALOG_DB),
+               "docs_dir": str(config.find_docs_dir() or ""),
+               "fingerprint": config.TARGET_FINGERPRINT,
+               "expected_identity": {key: value
+                                     for key, value in config.EXPECTED_IDENTITY.items()
+                                     if value}}
 
     def human_show():
         if name:
-            print("active profile: %s (%s)" % (name, source))
+            print("active profile: %s (%s)%s"
+                  % (name, source, " [confirmed]" if payload["confirmed"] else ""))
             for key in sorted(settings):
                 print("  %-16s %s" % (key, settings[key]))
         else:
@@ -632,9 +699,22 @@ def cmd_profile(args):
             value = payload["resolved"].get(key) or ""
             if value:
                 print("  %-16s %s" % (key, value))
-        print("\ndaemon dir: %s" % payload["runtime_dir"])
+        print("\ntarget fingerprint: %s" % payload["fingerprint"])
+        print("catalog           : %s" % payload["catalog_db"])
+        print("docs              : %s" % (payload["docs_dir"] or "(not found)"))
+        print("daemon dir        : %s" % payload["runtime_dir"])
+        if payload["expected_identity"]:
+            print("expected identity :")
+            for key in sorted(payload["expected_identity"]):
+                print("  %-18s %s" % (key, payload["expected_identity"][key]))
+        else:
+            print("expected identity : (none -- set one, then `%s profile verify`)" % PROG)
         if payload["binding_file"]:
-            print("binding   : %s" % payload["binding_file"])
+            print("binding           : %s" % payload["binding_file"])
+        if payload["require_explicit"] and not payload["confirmed"]:
+            print("\nwarning: PYAETHER_REQUIRE_EXPLICIT_PROFILE is set, but this profile "
+                  "came from %s,\n         which selects a target without confirming it. "
+                  "Export PYAETHER_PROFILE=<name>." % source)
     return _emit(payload, getattr(args, "json", False), human_show)
 
 
@@ -1163,6 +1243,11 @@ def build_parser():
     p_profile_clear.add_argument("--json", action="store_true", help="print raw JSON")
     p_profile_clear.set_defaults(func=cmd_profile)
 
+    p_profile_verify = profile_sub.add_parser(
+        "verify", help="check the target against the profile's expected_* values")
+    p_profile_verify.add_argument("--json", action="store_true", help="print raw JSON")
+    p_profile_verify.set_defaults(func=cmd_profile)
+
     p_sim = sub.add_parser("sim", help="run SPICE netlists on a switchable simulator")
     sim_sub = p_sim.add_subparsers(dest="sim_command", metavar="<operation>")
 
@@ -1344,6 +1429,32 @@ def build_parser():
     return parser
 
 
+# Commands that act on a target: they start a session, stage files, or write
+# artifacts. They are the ones the explicit-profile guard covers; read-only
+# commands never need a confirmed profile. (`exec` is guarded inside
+# runtime.exec_code instead, which the MCP server shares.)
+WRITE_COMMANDS = frozenset({
+    ("sim", "run"),
+    ("layout", "gen"), ("layout", "drc"), ("layout", "boolean"),
+    ("layout", "convert"), ("layout", "deck"),
+    ("sch", "build"), ("sch", "roundtrip"),
+    ("api", "sync-live"),
+})
+
+
+def _target_operation(args):
+    """``(command, operation)`` when this invocation acts on a target, else None."""
+    command = getattr(args, "command", None)
+    if not command:
+        return None
+    operation = None
+    for key, value in vars(args).items():
+        if key.endswith("_command") and isinstance(value, str):
+            operation = value
+            break
+    return (command, operation) if (command, operation) in WRITE_COMMANDS else None
+
+
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
@@ -1358,6 +1469,13 @@ def main(argv=None):
                 choices[args.command].print_help()
                 break
         return 0
+    acts = _target_operation(args)
+    if acts is not None:
+        refusal = _config().profile_confirmation_error(
+            "`%s %s`" % (PROG, " ".join(part for part in acts if part)))
+        if refusal:
+            print("error: %s" % refusal, file=sys.stderr)
+            return 1
     try:
         return args.func(args)
     except CliError as exc:

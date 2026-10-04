@@ -247,6 +247,51 @@ top-level config > default**, and each profile gets its own daemon socket
 (`<data dir>/profiles/<name>/daemon.sock`), so two profiles never share a
 session by accident.
 
+**Nothing is shared between two profiles.** Each also gets its own startup lock,
+pid and log, and the target-side paths are namespaced too: `remote_dir`,
+`sim_workdir`, `layout_workdir` and `sch_workdir` gain a `-<profile>` suffix
+unless you set them explicitly. Two profiles pointing at the same host would
+otherwise overwrite each other's deployed session script and staged netlists.
+With no profile active the paths are exactly what they always were.
+
+**Version-dependent artifacts are pinned, not guessed.** The offline symbol
+catalog is built from one installation's docs, so declaring
+`"aether_version": "2026.03"` in a profile keys the catalog to that release
+(`<data dir>/profiles/<name>/catalog-<version>.sqlite`). `api build` likewise
+refuses to guess when several Aether trees are installed: pin `docs_dir` in the
+profile (or pass `--docs`) instead of letting discovery pick one. A `docs_dir`
+written inside a profile block is honoured -- it used to be ignored.
+
+**A profile can assert what the target is.** Set `expected_hostname`,
+`expected_container`, `expected_image`, `expected_aether_version` or
+`expected_license_server`, then:
+
+```bash
+./bin/pyaether profile verify     # match / mismatch / unverifiable, per field
+```
+
+The first write into a live session refuses to proceed on a mismatch, and a
+*declared* value the target cannot report counts as a failure rather than a pass:
+an unverifiable claim is exactly how a wrong server slips through. Set
+`PYAETHER_ALLOW_IDENTITY_MISMATCH=1` when crossing targets on purpose.
+
+**Inherited targets can be refused.** With
+`PYAETHER_REQUIRE_EXPLICIT_PROFILE=1`, every command that acts on a target
+(`exec`, `sim run`, `layout gen|drc|boolean|convert|deck`,
+`sch build|roundtrip`, `api sync-live`) requires the profile to be named in
+*this* process (`PYAETHER_PROFILE=...`). A `.pyaether-profile` binding or a
+`default_profile` selects a target but does not confirm it for the command, so
+neither satisfies the guard. Read-only commands are unaffected.
+
+**A stale daemon cannot serve the wrong target.** Every daemon reply carries a
+fingerprint of the target it was started for. If the active profile's target
+changes while that daemon keeps running, a session call fails with an actionable
+message instead of quietly acting on the old target:
+
+```bash
+./bin/pyaether daemon restart     # pick up the new target
+```
+
 Conventions: human-readable output is English, `--json` prints raw JSON. Exit
 code `0` for success, `1` for a runtime failure (daemon won't start, catalog
 missing, `exec` raised, ...), `2` for a usage error. `exec` prints the executed
@@ -325,16 +370,21 @@ prefers the documented entry with the full typed signature.
 | `PYAETHER_SSH_PORT` | SSH port (optional) |
 | `PYAETHER_SSH_OPTS` | Extra ssh options, e.g. `-o StrictHostKeyChecking=no` (optional) |
 | `PYAETHER_PYTHON` | Interpreter on the target (default `python3.9`, resolved via the login shell) |
-| `PYAETHER_REMOTE_DIR` | Where the session script is deployed (default `/tmp/pyaether-bridge`) |
+| `PYAETHER_REMOTE_DIR` | Where the session script is deployed (default `/tmp/pyaether-bridge`, or `/tmp/pyaether-bridge-<profile>` with a profile active) |
 | `PYAETHER_LICENSE_SERVER` | Overrides the target's `LM_LICENSE_FILE`; unset keeps the target's own value |
 | `PYAETHER_BRIDGE_HOME` | Daemon data directory (default `~/.cache/pyaether-bridge`) |
 | `PYAETHER_DAEMON_SOCK` | Daemon unix socket path |
-| `PYAETHER_CATALOG_DB` | Catalog sqlite path (default `data/catalog.sqlite` in the repo) |
-| `PYAETHER_DOCS_DIR` | Default docs directory for `api build` |
+| `PYAETHER_CATALOG_DB` | Catalog sqlite path (default `data/catalog.sqlite` in the repo, or `profiles/<name>/catalog-<version>.sqlite` when `aether_version` is set) |
+| `PYAETHER_AETHER_VERSION` | Aether release this profile targets; keys the symbol catalog to that release |
+| `PYAETHER_DOCS_DIR` | Docs directory for `api build`; may be set per profile |
 | `PYAETHER_BRIDGE_NO_AUTOSTART` | Set to `1` to forbid auto-starting the daemon |
+| `PYAETHER_REQUIRE_EXPLICIT_PROFILE` | Set to `1` to refuse target-acting commands unless `PYAETHER_PROFILE` names the profile in this process |
+| `PYAETHER_EXPECTED_HOSTNAME` / `_CONTAINER` / `_IMAGE` / `_AETHER_VERSION` / `_LICENSE_SERVER` | What the target is asserted to be; checked by `profile verify` and before the first write |
+| `PYAETHER_ALLOW_IDENTITY_MISMATCH` | Set to `1` to allow writes to a target that fails the identity check |
+| `PYAETHER_ALLOW_STALE_DAEMON` | Set to `1` to use a running daemon that was started for a different target |
 | `PYAETHER_SIM_TARGET` | Where simulators run: `docker` / `ssh` / `local` (default: the bridge transport) |
 | `PYAETHER_SIM_BACKEND` | Default simulator backend (default `ngspice`) |
-| `PYAETHER_SIM_WORKDIR` | Simulator work directory on the target (default `/tmp/pyaether-sim`) |
+| `PYAETHER_SIM_WORKDIR` | Simulator work directory on the target (default `/tmp/pyaether-sim`, `-<profile>` when a profile is active) |
 | `PYAETHER_SIM_TIMEOUT` | Default simulation timeout in seconds (default 600) |
 | `PYAETHER_SIM_SSH_HOST` / `_PORT` / `_OPTS` | Simulator SSH target when it differs from the bridge target |
 | `PYAETHER_SIM_CONTAINER` | Simulator container when it differs from the bridge container |
@@ -348,8 +398,10 @@ prefers the documented entry with the full typed signature.
 | `PYAETHER_KLAYOUT_BIN` | KLayout executable (default `klayout`) |
 | `PYAETHER_KLAYOUT_TARGET` | Where KLayout runs: `docker` / `ssh` / `local` (default: this machine when KLayout is installed here) |
 | `PYAETHER_KLAYOUT_BUDDY_DIR` | Directory holding KLayout's stream tools (default: inferred from the KLayout binary) |
-| `PYAETHER_LAYOUT_WORKDIR` | Layout run directory root on the target (default `/tmp/pyaether-layout`) |
+| `PYAETHER_LAYOUT_WORKDIR` | Layout run directory root on the target (default `/tmp/pyaether-layout`, `-<profile>` when a profile is active) |
 | `PYAETHER_LAYOUT_TIMEOUT` | Default layout timeout in seconds (default 600) |
+| `PYAETHER_SCH_WORKDIR` | Schematic staging directory on the target (default `/tmp/pyaether-sch`, `-<profile>` when a profile is active) |
+| `PYAETHER_SCH_LIBDEFS` / `PYAETHER_SCH_AETHER_ROOT` | Where the target's library definitions and Aether tree are found |
 
 Machine-specific settings can also live in
 `$PYAETHER_BRIDGE_HOME/config.json` (default
