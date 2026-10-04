@@ -1,91 +1,126 @@
 # DeepSeek Harness
 
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`)
-composes a profile from plugin bundles. One of the plugins it ships is an MCP
-client (`@deepseek-ai/dsh-mcp-client`) that registers an external MCP server's
-tools on the agent's tool list. This bridge already speaks MCP, so using it as a
-DSH plugin is one profile entry plus one skill -- no Node package of our own.
+composes a profile from plugin bundles. This bridge is a plain MCP server, so it
+is registered **by a bundle**: a small local package whose `cordis.patch.yml`
+inserts one `@deepseek-ai/dsh-mcp-client` row. That bundle is what makes the
+tools appear as `mcp__pyaether__*`.
+
+## Two halves
+
+| Half | What it is | Who installs it |
+| --- | --- | --- |
+| Registration (`mcp__pyaether__*`) | the bundle `dsh-bundle-pyaether-bridge`, kept next to this repository | the harness' own plugin manager |
+| Skill (how to drive the tools) | `<workspace>/.dsh/skills/pyaether-bridge/SKILL.md` | `pyaether dsh install` |
+
+## Why registration is a bundle, not a written patch
+
+Adding the row straight to a profile's `cordis.patch.yml` looks simpler, and does
+work for a profile the `dsh` CLI owns. It does **not** work for a profile the
+desktop application manages, which is the normal case on a workstation:
+
+```
+$ pyaether dsh install --profile desktop
+error: the harness rejected the edited patch file, so the change was rolled back
+(.../cordis.patch.yml). Harness output:
+error: profile "desktop" is managed exclusively by the Electron application
+```
+
+The composition check can never pass there, so a careful installer rolls itself
+back -- and an installer that always rolls back is worse than none. The bundle
+channel sidesteps the question: a bundle is a separate package, so nothing edits
+the profile by hand.
 
 ## Install
 
-```bash
-./bin/pyaether dsh status --profile <profile>   # installed for this profile?
-./bin/pyaether dsh patch --profile <profile>    # print the patch to apply by hand
-./bin/pyaether dsh install --profile <profile>  # write it, plus the skill
-./bin/pyaether dsh verify --profile <profile>   # prove the harness composes it
+**1. The bundle.** Through the harness' plugin manager (or the Plugins page in the
+GUI), pointing at the local directory:
+
+```
+link:/abs/path/to/<workspace>/dsh-bundle-pyaether-bridge
 ```
 
-`--profile` defaults to `web`, so **pass the profile you actually run**: `echo
-$DSH_PROFILE` prints its name and `$DSH_PROFILE_DIR` its directory. Installing
-into a profile the harness never loads looks successful and changes nothing. The
-patch entry is per profile; the skill is written once, to
-`<dsh-home>/skills/pyaether-bridge/SKILL.md`.
-
-`--dsh-home` overrides `$DSH_HOME` (default `~/.dsh`); that is how the test suite
-exercises this without touching your real configuration.
-
-After installing, restart the harness or reload the profile. The tools then
-appear as `mcp__pyaether__*`.
-
-## What gets written
-
-`install` appends one entry to `<dsh-home>/profiles/<profile>/cordis.patch.yml`
-(keeping a timestamped backup) and copies the skill to
-`<dsh-home>/skills/pyaether-bridge/SKILL.md`:
+The bundle contributes exactly one row:
 
 ```yaml
 - insert:
-    - id: "pyaether-mcp"
-      name: "@deepseek-ai/dsh-mcp-client"
+    - id: mcp-pyaether-bridge
+      name: '@deepseek-ai/dsh-mcp-client'
       config:
-        serverName: "pyaether"
-        transport: "stdio"
-        command: "/usr/bin/python3"
-        args: ["/abs/path/to/pyaether-bridge/bin/pyaether-mcp"]
+        serverName: pyaether
+        transport: stdio
+        command: '/usr/bin/python3'
+        args: ['/abs/path/to/pyaether-bridge/bin/pyaether-mcp']
         toolCallTimeoutMs: 1800000
         failOnStartupError: false
+        reconnect:
+          enabled: true
 ```
 
-Four details are load-bearing, and each of them was a real failure first:
+**2. The skill**, into the workspace:
 
-1. **`- insert:` is required.** A top-level `- id:` item is a *patch* aimed at an
-   existing entry id, so an entry whose id does not exist yet is silently
-   dropped: the file parses, the harness starts, and the plugin never appears.
-2. **The scoped package name must be quoted.** `name: @deepseek-ai/...` is invalid
-   YAML (`@` is a reserved indicator) and the harness refuses to boot the profile.
-3. **`toolCallTimeoutMs` is raised deliberately.** The MCP client defaults to 60 s
-   per call, but a simulation or a layout job may legitimately run for minutes,
-   so the default turns long runs into timeouts.
-4. **The command is absolute.** The harness starts stdio servers with a scrubbed
-   environment from its own working directory, so `PATH` lookup and relative
-   paths are not reliable.
+```bash
+./bin/pyaether dsh install     # -> <workspace>/.dsh/skills/pyaether-bridge/SKILL.md
+./bin/pyaether dsh status      # is it installed, and does a profile scan it?
+./bin/pyaether dsh uninstall   # remove it again
+```
 
-## Lifecycle guarantees
+`--workspace DIR` overrides the workspace root; `--dsh-home DIR` overrides
+`$DSH_HOME` for the read-only reporting `status` does.
 
-* `install` never rewrites your patch file: it appends, after saving a backup.
-  Running it twice does not duplicate the entry.
-* An empty `[]` layer is handled correctly. Appending block items after `[]`
-  produces invalid YAML, so that case writes a fresh list instead.
-* A file the installer does not understand (an inline flow sequence, for
-  example) is refused with the block to paste, rather than being corrupted.
-* After editing, it asks the harness. If `dsh --dump-config` fails, the edit is
-  rolled back so you are never left with a profile that cannot boot.
-* `uninstall` removes the entry, drops the `insert` block when it becomes empty,
-  leaves a valid empty list behind, and deletes the skill.
+## Why the skill is workspace-level, and why `status` checks the root
 
-## Verifying
+The filesystem skill provider ships disabled. Once enabled it reads an explicit
+`customSkillDirs` list, so the global `$DSH_HOME/skills` directory is never
+scanned: a skill written there is installed and invisible. The skill therefore
+goes under the workspace, and `status` reports whether a profile actually scans
+that root -- installed-but-unscanned changes nothing:
 
-`./bin/pyaether dsh verify` runs the real `dsh --profile <p> --dump-config` and
-checks that the composed tree contains the entry. A patch file on disk is not
-evidence: it can be overridden by a later layer or ignored entirely.
+```
+skill      : /.../模拟开发/.dsh/skills/pyaether-bridge/SKILL.md
+in sync    : yes
+skill root : /.../模拟开发/.dsh/skills
+scanned by : desktop
+bundle     : /.../模拟开发/dsh-bundle-pyaether-bridge
+registered : desktop -> mcp__pyaether__*
+```
 
-`tests/dsh_probe.py` performs the whole cycle in a throwaway `DSH_HOME`: the
-baseline composes, install writes the entry, the composed tree contains it, a
-second install is idempotent, and uninstall leaves a valid profile.
+The workspace root is resolved the same way the harness' instruction loader
+resolves it: the nearest ancestor carrying a `.dsh-workspace` marker (or
+`--workspace` / `$DSH_WORKSPACE`), so a session started deep inside a project
+still finds the same root.
+
+To make a root loadable, list it in the provider row of the profile patch:
+
+```yaml
+- id: skill-filesystem
+  name: "@deepseek-ai/dsh-skill-filesystem"
+  disabled: false
+  config:
+    customSkillDirs:
+      - "/abs/path/to/<workspace>/.dsh/skills"
+```
+
+`pyaether dsh install` prints exactly this block when no profile scans the root
+yet, rather than reporting a success that would never load.
+
+## After installing
+
+Reload the profile (or restart the harness). The tools then appear as
+`mcp__pyaether__*`. `pyaether dsh status` shows the wiring, but only the harness
+can prove the tools are actually callable -- confirm the `mcp__pyaether__*` tools
+are present before relying on them.
 
 ## Notes
 
-* Only the MCP client plugin is used. No third-party DSH plugin is installed and
-  no build script runs outside the agent sandbox.
-* Verified against DeepSeek Harness `0.2.0-rc.2`. DSH is a developer preview, so
-  re-run `dsh verify` after upgrading it.
+- `toolCallTimeoutMs` is raised deliberately: the MCP client defaults to 60 s per
+  call, and a simulation or a layout job legitimately runs for minutes.
+- The command is absolute: the harness starts stdio servers with a scrubbed
+  environment from its own working directory, so `PATH` lookup and relative paths
+  are not reliable.
+- Target settings (container / transport / interpreter / docs dir) are **not** in
+  the bundle: the bridge resolves them from its own profile config
+  (`~/.cache/pyaether-bridge/config.json`), so there is one source of truth.
+- Nothing here writes into a profile. `tests/dsh_probe.py` asserts that in a
+  throwaway workspace and `DSH_HOME`, and covers marker resolution,
+  install / status / uninstall, and reporting of a disabled provider row.

@@ -140,7 +140,7 @@ echo 'import pyAether; print(pyAether.__file__)' | ./bin/pyaether exec
 ./bin/pyaether layout drc out.gds --rules rules.json --layers '{"m1":[1,0]}'
 ./bin/pyaether layout compare a.gds b.gds         # exit 0 = identical
 
-./bin/pyaether dsh install --profile <profile>    # DeepSeek Harness plugin
+./bin/pyaether dsh install                        # skill into <workspace>/.dsh/skills
 ./bin/pyaether version
 ```
 
@@ -170,20 +170,26 @@ reporting zero violations. See [docs/LAYOUT.md](docs/LAYOUT.md).
 
 ## DeepSeek Harness
 
-The bridge is an MCP server, and DeepSeek Harness ships an MCP client plugin, so
-it installs as a DSH plugin with one command:
+The bridge is an MCP server, so DeepSeek Harness reaches it in two halves:
+
+- **Registration** (`mcp__pyaether__*`) comes from a local **bundle**
+  (`dsh-bundle-pyaether-bridge`), installed through the harness' own plugin
+  manager. A bundle is a separate package, so nothing edits a profile by hand --
+  which matters because a profile the desktop application manages refuses CLI
+  composition and rolls a hand-written patch back.
+- **The skill** (how to drive the tools) is installed into the workspace:
 
 ```bash
-./bin/pyaether dsh install --profile <profile>   # patch entry + skill, with a backup
-./bin/pyaether dsh verify --profile <profile>    # prove the harness composes it
+./bin/pyaether dsh install     # -> <workspace>/.dsh/skills/pyaether-bridge/SKILL.md
+./bin/pyaether dsh status      # installed? in sync? does a profile scan that root?
+./bin/pyaether dsh uninstall   # remove it again
 ```
 
-`--profile` defaults to `web`: pass the profile you actually run (`echo
-$DSH_PROFILE`). The patch entry is per profile, the skill is global.
-
-The install raises the MCP client's per-call timeout (its 60 s default is too
-short for simulations and layout jobs), uses the `- insert:` form the harness
-requires, and rolls the edit back if the harness rejects the result. See
+The skill is workspace-level, not global: the filesystem skill provider ships
+disabled and then scans an explicit `customSkillDirs` list, so `$DSH_HOME/skills`
+is never read. `dsh status` therefore reports whether a profile actually scans
+the root, and `dsh install` prints the exact block to add when none does -- an
+installed-but-unscanned skill changes nothing. See
 [docs/DEEPSEEK-HARNESS.md](docs/DEEPSEEK-HARNESS.md).
 
 ## Simulators

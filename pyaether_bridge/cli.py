@@ -727,92 +727,85 @@ def cmd_profile(args):
 def cmd_dsh(args):
     module = _dsh()
     action = getattr(args, "dsh_command", None) or "status"
-    profile = getattr(args, "profile", None) or "web"
+    workspace = getattr(args, "workspace", None)
     home = getattr(args, "dsh_home", None)
-
-    if action == "patch":
-        body = module.render_patch()
-        if getattr(args, "json", False):
-            _print_json({"profile": profile, "patch": body,
-                         "entry": module.entry()})
-        else:
-            sys.stdout.write(body)
-        return 0
 
     if action == "install":
         try:
-            report = module.install(profile, home, dry_run=getattr(args, "dry_run", False))
+            report = module.install(workspace, home,
+                                    dry_run=getattr(args, "dry_run", False))
         except module.DshError as exc:
-            raise CliError(str(exc),
-                           hint="check `%s dsh status --profile %s` first." % (PROG, profile))
+            raise CliError(str(exc), hint="check `%s dsh status` first." % PROG)
 
         def human_install():
             if report["dry_run"]:
-                print("dry run -- the patch that would be written:\n")
-                sys.stdout.write(report.get("patch_preview", ""))
-                return
-            if report["entry_already_present"]:
-                print("MCP entry already present, left unchanged: %s" % report["patch_file"])
+                print("dry run -- nothing written")
+                print("workspace  : %s" % report["workspace"])
+                print("skill      : %s" % report["skill_file"])
+            elif report["unchanged"]:
+                print("skill already up to date: %s" % report["skill_file"])
             else:
-                print("wrote MCP entry into %s" % report["patch_file"])
-                if report["backup"]:
-                    print("  backup: %s" % report["backup"])
-            print("installed skill: %s" % report["skill_file"])
-            print("\nnext: restart the harness (or reload the profile), then the tools "
-                  "appear as mcp__%s__*" % module.SERVER_NAME)
-            print("verify: %s dsh verify --profile %s" % (PROG, profile))
+                print("installed skill: %s" % report["skill_file"])
+            print("skill root : %s" % report["skills_root"])
+            if report["skill_root_enabled_in"]:
+                print("scanned by : %s" % ", ".join(report["skill_root_enabled_in"]))
+            elif report["skill_root_disabled_in"]:
+                print("NOT scanned: the %s row is disabled in %s"
+                      % (module.SKILL_PROVIDER_ROW,
+                         ", ".join(report["skill_root_disabled_in"])))
+            else:
+                print("NOT scanned: no profile lists this skills root")
+            if report.get("next"):
+                print("\n%s" % report["next"])
+            print("\nregistering mcp__%s__* is the bundle's job (%s), not this "
+                  "command's; see docs/DEEPSEEK-HARNESS.md."
+                  % (module.SERVER_NAME, module.BUNDLE_NAME))
         _emit(report, getattr(args, "json", False), human_install)
         return 0
 
     if action == "uninstall":
         try:
-            report = module.uninstall(profile, home)
+            report = module.uninstall(workspace, home)
         except module.DshError as exc:
             raise CliError(str(exc))
         return _emit(report, getattr(args, "json", False), lambda: (
-            print("entry removed: %s" % report["entry_removed"]),
             print("skill removed: %s" % report["skill_removed"]),
-            print("backup: %s" % (report["backup"] or "(none)"))))
-
-    if action == "verify":
-        try:
-            report = module.verify(profile, home)
-        except module.DshError as exc:
-            raise CliError(str(exc))
-
-        def human_verify():
-            print("dsh        : %s" % (report.get("dsh_cli") or "(not on PATH)"))
-            print("dsh home   : %s" % report["dsh_home"])
-            print("profile    : %s (exists=%s)" % (report["profile"], report["profile_exists"]))
-            print("patch      : %s (entry installed=%s)"
-                  % (report["patch_file"], report["entry_installed"]))
-            print("skill      : %s (installed=%s)"
-                  % (report["skill_file"], report["skill_installed"]))
-            print("composed   : %s" % ("contains the entry" if report.get("composed_ok")
-                                       else "NOT verified"))
-            if report.get("compose_error"):
-                print("  %s" % report["compose_error"])
-            print("mcp command: %s" % report["mcp_command"])
-        _emit(report, getattr(args, "json", False), human_verify)
-        return 0 if report.get("composed_ok") else 1
+            print("skill        : %s" % report["skill_file"]),
+            print("note         : the bundle registered in the profile is untouched")))
 
     # default: status
     try:
-        report = module.status(profile, home)
+        report = module.status(workspace, home)
     except module.DshError as exc:
         raise CliError(str(exc))
 
     def human_status():
-        print("dsh CLI    : %s" % (report["dsh_cli"] or "(not on PATH -- install DeepSeek Harness)"))
         print("dsh home   : %s" % report["dsh_home"])
-        print("profile    : %s%s" % (report["profile"],
-                                     "" if report["profile_exists"] else " (missing)"))
-        print("MCP entry  : %s" % ("installed" if report["entry_installed"] else "not installed"))
-        print("skill      : %s" % ("installed" if report["skill_installed"] else "not installed"))
-        print("server     : %s (timeout %sms)"
-              % (report["mcp_command"], report["tool_timeout_ms"]))
-        if not report["entry_installed"]:
-            print("\ninstall with: %s dsh install --profile %s" % (PROG, report["profile"]))
+        print("workspace  : %s%s" % (report["workspace"],
+                                     "" if report["workspace_marker"]
+                                     else " (no %s marker)" % module.WORKSPACE_MARKER))
+        print("skill      : %s%s" % (report["skill_file"],
+                                     "" if report["skill_installed"]
+                                     else " (not installed)"))
+        if report["skill_installed"]:
+            print("in sync    : %s" % ("yes" if report["skill_in_sync"]
+                                       else "NO -- re-run `%s dsh install`" % PROG))
+        print("skill root : %s" % report["skills_root"])
+        if report["skill_root_enabled_in"]:
+            print("scanned by : %s" % ", ".join(report["skill_root_enabled_in"]))
+        elif report["skill_root_disabled_in"]:
+            print("NOT scanned: the %s row is disabled in %s"
+                  % (module.SKILL_PROVIDER_ROW,
+                     ", ".join(report["skill_root_disabled_in"])))
+        else:
+            print("NOT scanned: no profile lists this skills root")
+        print("bundle     : %s%s" % (report["bundle_dir"],
+                                     "" if report["bundle_present"] else " (missing)"))
+        if report["bundle_linked_in"]:
+            print("registered : %s -> mcp__%s__*"
+                  % (", ".join(report["bundle_linked_in"]), report["server_name"]))
+        else:
+            print("registered : (no profile declares %s yet)" % report["bundle_name"])
     return _emit(report, getattr(args, "json", False), human_status)
 
 
@@ -1350,39 +1343,34 @@ def build_parser():
     p_lay_deck.add_argument("--json", action="store_true", help="print raw JSON")
     p_lay_deck.set_defaults(func=cmd_layout_deck)
 
-    p_dsh = sub.add_parser("dsh",
-                           help="use this bridge as a DeepSeek Harness plugin")
+    p_dsh = sub.add_parser(
+        "dsh", help="workspace skill, and bundle wiring, for DeepSeek Harness")
     dsh_sub = p_dsh.add_subparsers(dest="dsh_command", metavar="<operation>")
 
-    def _dsh_common(parser, need_profile=False):
-        parser.add_argument("--profile", default="web",
-                            help="harness profile to target (default web)")
+    def _dsh_common(parser):
+        parser.add_argument("--workspace",
+                            help="workspace root holding .dsh/skills (default: the "
+                                 "nearest .dsh-workspace ancestor of the cwd)")
         parser.add_argument("--dsh-home",
-                            help="override $DSH_HOME (default ~/.dsh)")
+                            help="override $DSH_HOME (default ~/.dsh); read-only, "
+                                 "used to report the wiring")
         parser.add_argument("--json", action="store_true", help="print raw JSON")
 
-    p_dsh_status = dsh_sub.add_parser("status", help="is the plugin installed for a profile")
+    p_dsh_status = dsh_sub.add_parser(
+        "status", help="is the workspace skill installed, and does a profile scan it")
     _dsh_common(p_dsh_status)
     p_dsh_status.set_defaults(func=cmd_dsh)
 
-    p_dsh_patch = dsh_sub.add_parser("patch", help="print the profile patch to paste in")
-    _dsh_common(p_dsh_patch)
-    p_dsh_patch.set_defaults(func=cmd_dsh)
-
-    p_dsh_install = dsh_sub.add_parser("install", help="write the patch entry and install the skill")
+    p_dsh_install = dsh_sub.add_parser(
+        "install", help="install the skill into <workspace>/.dsh/skills")
     _dsh_common(p_dsh_install)
     p_dsh_install.add_argument("--dry-run", action="store_true",
                                help="show what would be written, change nothing")
     p_dsh_install.set_defaults(func=cmd_dsh)
 
-    p_dsh_uninstall = dsh_sub.add_parser("uninstall", help="remove the entry and the skill")
+    p_dsh_uninstall = dsh_sub.add_parser("uninstall", help="remove the workspace skill")
     _dsh_common(p_dsh_uninstall)
     p_dsh_uninstall.set_defaults(func=cmd_dsh)
-
-    p_dsh_verify = dsh_sub.add_parser(
-        "verify", help="check that the harness really composes the entry (runs dsh --dump-config)")
-    _dsh_common(p_dsh_verify)
-    p_dsh_verify.set_defaults(func=cmd_dsh)
 
     p_sch = sub.add_parser("sch", help="schematic round trip (canvas <-> Aether)")
     sch_sub = p_sch.add_subparsers(dest="sch_command", metavar="<operation>")

@@ -22,7 +22,7 @@ big picture see the [README](README.md#architecture).
 <ROOT>/pyaether_bridge/schematic.py        # schematic round trip: canvas <-> Aether
 <ROOT>/pyaether_bridge/sch_build_script.py # target-side: snapshot -> real schematic
 <ROOT>/pyaether_bridge/sch_snapshot_script.py # target-side: real schematic -> snapshot
-<ROOT>/pyaether_bridge/dsh.py              # DeepSeek Harness integration (MCP row + skill)
+<ROOT>/pyaether_bridge/dsh.py              # DeepSeek Harness: workspace skill + wiring check
 <ROOT>/bin/pyaether                        # CLI launcher shim
 <ROOT>/bin/pyaether-mcp                    # MCP launcher shim
 <ROOT>/tests/smoke_cli.sh                  # CLI smoke test (needs no Docker)
@@ -240,24 +240,38 @@ one back out.
 
 ## dsh.py
 
-DeepSeek Harness integration. `dsh` composes a profile from plugin bundles and
-ships an MCP client plugin (`@deepseek-ai/dsh-mcp-client`), so "use this bridge
-as a DSH plugin" means one loader entry plus the matching skill -- the MCP server
-is not replaced, it is registered.
+DeepSeek Harness integration, split into the two halves the harness actually has:
+a *bundle* registers the MCP server, and a *skill* teaches the model to drive it.
+This module owns the skill; the bundle is a separate local package
+(`dsh-bundle-pyaether-bridge`) installed through the harness' plugin manager.
 
-- `install` appends an `- insert:` item to
-  `<DSH_HOME>/profiles/<profile>/cordis.patch.yml` (a bare `- id:` line would be
-  a patch aimed at a row that does not exist yet and is silently dropped) and
-  copies `integrations/dsh/skills/pyaether-bridge/SKILL.md` to
-  `<DSH_HOME>/skills/`. The previous patch file is backed up first.
-- The entry raises `toolCallTimeoutMs` from the client's 60 s default to 30 min
-  (a simulation or a layout job legitimately runs for minutes) and spells out an
-  absolute interpreter plus launcher path, because the harness starts the server
-  from its own working directory with `PYTHONPATH` scrubbed.
-- `verify` runs `dsh --profile <profile> --dump-config` to prove the harness
-  really composes the entry, rather than trusting that the YAML was accepted.
-- Two separate targets: the patch layer is per profile, the skill is global. The
-  `--profile` default is `web`, so pass the profile you actually run.
+```python
+def find_workspace(explicit=None, start=None) -> str   # --workspace / $DSH_WORKSPACE / .dsh-workspace marker
+def skill_source() -> str                             # integrations/dsh/skills/<name>/SKILL.md
+def skill_target(workspace) -> str                    # <workspace>/.dsh/skills/<name>/SKILL.md
+def skill_root_state(workspace, home=None) -> dict    # which profiles scan / disable that root
+def bundle_state(workspace, home=None) -> dict        # is the bundle there, which profiles declare it
+def status(workspace=None, home=None) -> dict         # read-only view of all of the above
+def install(workspace=None, home=None, dry_run=False) # copy the skill; never touches a profile
+def uninstall(workspace=None, home=None)              # remove the skill again
+```
+
+- **It never writes to a profile.** A profile the desktop application manages
+  refuses CLI composition (`error: profile "desktop" is managed exclusively by the
+  Electron application`), so a patch written here can never be verified and has to
+  be rolled back; an installer that always rolls back is worse than none. The
+  bundle channel does the same job without editing the profile.
+- **The skill is workspace-level, not global.** The filesystem skill provider
+  ships disabled and then reads an explicit `customSkillDirs` list, so
+  `$DSH_HOME/skills` is never scanned -- a skill written there is installed and
+  invisible. `skill_root_state` reads the provider row back (is the root listed,
+  is that row `disabled: true`), so `status` and `install` can report "installed
+  but never loaded" instead of a success that means nothing.
+- **The workspace root is the one the instruction loader pins**: the nearest
+  ancestor carrying a `.dsh-workspace` marker, overridable with `--workspace` or
+  `$DSH_WORKSPACE`.
+- The provider row is read with small helpers (`_row_body`, `_row_disabled`)
+  rather than a YAML parser, keeping the standard-library-only rule.
 
 ## Daemon and session protocol
 
@@ -402,7 +416,7 @@ pyaether sim run NETLIST [--backend ngspice|spectre|custom] [--mode MODE]
                         [--timeout S] [--include FILE] [--run-id ID] [--json]
 pyaether layout probe|gen|info|drc|boolean|tools|convert|compare|deck [--json]
 pyaether sch snapshot|build|netlist|roundtrip [--json]
-pyaether dsh status|patch|install|uninstall|verify [--profile P] [--dsh-home DIR]
+pyaether dsh status|install|uninstall [--workspace DIR] [--dsh-home DIR]
                         [--dry-run] [--json]
 pyaether version
 ```
