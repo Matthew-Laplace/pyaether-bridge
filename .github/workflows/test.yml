@@ -58,7 +58,7 @@ jobs:
       - name: Layout probe (KLayout is not installed on this runner, so it skips)
         run: python tests/layout_probe.py
 
-      - name: DeepSeek Harness probe (hermetic: throwaway workspace and DSH_HOME)
+      - name: "DeepSeek Harness probe (hermetic: throwaway workspace and DSH_HOME)"
         run: python tests/dsh_probe.py
 
       - name: Vendor simulator probe (skips without ALPS and a licence)
