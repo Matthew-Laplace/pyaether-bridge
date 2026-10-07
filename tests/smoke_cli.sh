@@ -114,6 +114,58 @@ fi
 echo "[5] exec with empty input (expect exit code 1, no daemon started)"
 run_case "exec with no input" 1 10 "$CLI" exec </dev/null
 
+echo "[6] --json wire format (compact by default, --debug restores the long form)"
+run_case "status --json --debug" 0 30 "$CLI" status --json --debug
+DEBUG_OUT="$LAST_OUT"
+run_case "status --json (again)" 0 30 "$CLI" status --json
+PLAIN_OUT="$LAST_OUT"
+if [ -n "$PLAIN_OUT" ] && [ -n "$DEBUG_OUT" ]; then
+    case "$PLAIN_OUT" in
+        *$'\n'*) bad "default --json is not a single line" ;;
+        *) ok "default --json is a single line" ;;
+    esac
+    if [ "${#PLAIN_OUT}" -lt "${#DEBUG_OUT}" ]; then
+        ok "default --json is smaller than --debug"
+    else
+        bad "default --json is not smaller than --debug"
+    fi
+fi
+
+echo "[7] protocol.brief() drops diagnostics on success, keeps them on failure"
+if PYAETHER_REPO="$ROOT" "$PY" - <<'PYEOF'
+import os
+import sys
+
+sys.path.insert(0, os.environ["PYAETHER_REPO"])
+from pyaether_bridge import protocol
+
+envelope = {
+    "ok": True, "status": "SUCCESS", "operation": "info", "data": {"shapes": 10},
+    "errors": [], "warnings": [],
+    "metadata": {"artifact": "/tmp/a.gds", "work_dir": "/tmp/run-1",
+                 "command": "klayout -b -r x.py", "target_reason": "found it"},
+}
+brief = protocol.brief(envelope)
+assert brief["metadata"] == {"artifact": "/tmp/a.gds"}, brief["metadata"]
+assert brief["data"] == {"shapes": 10}, brief["data"]
+
+failed = dict(envelope, ok=False, status="FAILURE")
+assert protocol.brief(failed)["metadata"] == envelope["metadata"], "failure lost diagnostics"
+
+ready = {"session": {"ready": True, "import_log": "x" * 100, "symbols": 5}}
+assert protocol.brief(ready)["session"] == {"ready": True, "symbols": 5}, protocol.brief(ready)
+
+unready = {"session": {"ready": False, "import_log": "boom", "symbols": 0}}
+assert protocol.brief(unready)["session"]["import_log"] == "boom", "unready session lost its log"
+
+assert "\n" not in protocol.dumps(envelope), "default output is not compact"
+assert "\n" in protocol.dumps(envelope, debug=True), "--debug output is not indented"
+assert protocol.brief("not a dict") == "not a dict"
+PYEOF
+then ok "brief() keeps results and drops diagnostics"
+else bad "brief() trimming is wrong"
+fi
+
 echo
 echo "== result: $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ] || exit 1

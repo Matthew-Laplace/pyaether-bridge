@@ -304,6 +304,12 @@ missing, `exec` raised, ...), `2` for a usage error. `exec` prints the executed
 code's stdout first and then the value of the final expression; failures go to
 stderr.
 
+`--json` writes one compact line and leaves out execution diagnostics
+(`metadata.target`, `work_dir`, `command`, `timings`, ...) that describe how the
+bridge ran rather than what it found. Those fields come back when the call did
+not succeed, and `--debug` prints them always, indented. The envelope and its
+keys are the same either way, so a parser sees no difference.
+
 With `PYAETHER_BRIDGE_NO_AUTOSTART=1`, `status` reports the current state and
 starts nothing.
 

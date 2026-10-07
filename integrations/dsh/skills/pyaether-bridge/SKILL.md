@@ -26,6 +26,10 @@ Read `ok` / `status` from the JSON — a non-empty body is not proof of success:
   `ok=false` with `error_type`, not as a shell failure
 * human-readable output goes to stdout; diagnostics and the daemon protocol stay
   off it, so `--json` output is always parseable
+* `--json` prints one compact line. Execution diagnostics (`metadata.target`,
+  `target_reason`, `work_dir`, `command`, `timings`, ...) are dropped on success
+  and kept on failure; `session.import_log` is dropped once the session reports
+  ready. `--debug` restores the indented form with every field.
 
 ## Command map (what the MCP tool names do)
 

@@ -188,8 +188,18 @@ def cmd_sch_roundtrip(args):
 # --------------------------------------------------------------------------- #
 # output helpers
 # --------------------------------------------------------------------------- #
+_OUTPUT_DEBUG = False
+
+
+def _add_output_flags(parser):
+    """Attach the two output flags every leaf subcommand shares."""
+    parser.add_argument("--json", action="store_true", help="print raw JSON")
+    parser.add_argument("--debug", action="store_true",
+                        help="keep indentation and execution diagnostics in --json")
+
+
 def _print_json(payload):
-    print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+    print(_load("protocol").dumps(payload, debug=_OUTPUT_DEBUG))
 
 
 def _emit(payload, as_json, human):
@@ -1159,7 +1169,7 @@ def build_parser():
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
     p_status = sub.add_parser("status", help="show target, daemon and session status")
-    p_status.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_output_flags(p_status)
     p_status.set_defaults(func=cmd_status)
 
     p_exec = sub.add_parser("exec", help="run Python code in the target pyAether session")
@@ -1168,7 +1178,7 @@ def build_parser():
     source.add_argument("-f", "--file", help="read the code from a file")
     p_exec.add_argument("--timeout", type=float, default=120.0,
                         help="timeout in seconds (default 120)")
-    p_exec.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_output_flags(p_exec)
     p_exec.set_defaults(func=cmd_exec)
 
     p_api = sub.add_parser("api", help="offline PyAether API catalog")
@@ -1178,12 +1188,12 @@ def build_parser():
     p_build.add_argument("--docs", help="docs/html directory (auto-detected by default)")
     p_build.add_argument("--out", help="output sqlite path (default data/catalog.sqlite in the repo)")
     p_build.add_argument("--jobs", type=int, default=1, help="worker processes (default 1)")
-    p_build.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_output_flags(p_build)
     p_build.set_defaults(func=cmd_api_build)
 
     p_stats = api_sub.add_parser("stats", help="show catalog statistics")
     p_stats.add_argument("--db", help="catalog sqlite path")
-    p_stats.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_output_flags(p_stats)
     p_stats.set_defaults(func=cmd_api_stats)
 
     p_search = api_sub.add_parser("search", help="search API symbols")
@@ -1191,14 +1201,14 @@ def build_parser():
     p_search.add_argument("--limit", type=int, default=20, help="maximum hits (default 20)")
     p_search.add_argument("--kind", help="only return this kind (e.g. function/class/method)")
     p_search.add_argument("--db", help="catalog sqlite path")
-    p_search.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_output_flags(p_search)
     p_search.set_defaults(func=cmd_api_search)
 
     p_show = api_sub.add_parser("show", help="show the full documentation of one symbol")
     p_show.add_argument("symbol", help="symbol name, e.g. pyAether.emyInitDb")
     p_show.add_argument("--max-chars", type=int, default=4000, help="description truncation length")
     p_show.add_argument("--db", help="catalog sqlite path")
-    p_show.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_output_flags(p_show)
     p_show.set_defaults(func=cmd_api_show)
 
     p_sync = api_sub.add_parser(
@@ -1206,13 +1216,13 @@ def build_parser():
     p_sync.add_argument("--db", help="catalog sqlite path")
     p_sync.add_argument("--timeout", type=float, default=300.0,
                         help="session execution timeout (default 300)")
-    p_sync.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_output_flags(p_sync)
     p_sync.set_defaults(func=cmd_api_sync_live)
 
     p_daemon = sub.add_parser("daemon", help="manage the host daemon")
     p_daemon.add_argument("action", nargs="?", default="status",
                           choices=["start", "stop", "status", "restart"])
-    p_daemon.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_output_flags(p_daemon)
     p_daemon.set_defaults(func=cmd_daemon)
 
     p_profile = sub.add_parser("profile",
@@ -1220,25 +1230,25 @@ def build_parser():
     profile_sub = p_profile.add_subparsers(dest="profile_command", metavar="<operation>")
 
     p_profile_list = profile_sub.add_parser("list", help="list profiles defined in the config file")
-    p_profile_list.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_output_flags(p_profile_list)
     p_profile_list.set_defaults(func=cmd_profile)
 
     p_profile_show = profile_sub.add_parser("show", help="show the active profile and resolved settings")
-    p_profile_show.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_output_flags(p_profile_show)
     p_profile_show.set_defaults(func=cmd_profile)
 
     p_profile_bind = profile_sub.add_parser("bind", help="bind the current directory to a profile")
     p_profile_bind.add_argument("name", help="profile name defined in the config file")
-    p_profile_bind.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_output_flags(p_profile_bind)
     p_profile_bind.set_defaults(func=cmd_profile)
 
     p_profile_clear = profile_sub.add_parser("clear", help="remove the binding file found from here")
-    p_profile_clear.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_output_flags(p_profile_clear)
     p_profile_clear.set_defaults(func=cmd_profile)
 
     p_profile_verify = profile_sub.add_parser(
         "verify", help="check the target against the profile's expected_* values")
-    p_profile_verify.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_output_flags(p_profile_verify)
     p_profile_verify.set_defaults(func=cmd_profile)
 
     p_sim = sub.add_parser("sim", help="run SPICE netlists on a switchable simulator")
@@ -1247,7 +1257,7 @@ def build_parser():
     p_sim_backends = sim_sub.add_parser("backends", help="list simulator backends")
     p_sim_backends.add_argument("--probe", action="store_true",
                                 help="also check the target for each backend binary")
-    p_sim_backends.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_output_flags(p_sim_backends)
     p_sim_backends.set_defaults(func=cmd_sim_backends)
 
     p_sim_run = sim_sub.add_parser("run", help="run one netlist and parse the results")
@@ -1259,28 +1269,28 @@ def build_parser():
     p_sim_run.add_argument("--include", action="append", metavar="FILE",
                            help="extra file (model/Verilog-A include) staged next to the netlist; repeatable")
     p_sim_run.add_argument("--run-id", help="suffix for the run directory name")
-    p_sim_run.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_output_flags(p_sim_run)
     p_sim_run.set_defaults(func=cmd_sim_run)
 
     p_layout = sub.add_parser("layout", help="generate and check layouts with KLayout")
     layout_sub = p_layout.add_subparsers(dest="layout_command", metavar="<operation>")
 
     p_lay_probe = layout_sub.add_parser("probe", help="check that KLayout is available")
-    p_lay_probe.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_output_flags(p_lay_probe)
     p_lay_probe.set_defaults(func=cmd_layout_probe)
 
     p_lay_gen = layout_sub.add_parser("gen", help="build a GDS2/OASIS layout from a spec")
     p_lay_gen.add_argument("spec", help="spec as inline JSON or a path to a .json file")
     p_lay_gen.add_argument("-o", "--output", help="output layout path (.gds / .oas)")
     p_lay_gen.add_argument("--timeout", type=float, help="timeout in seconds (default 600)")
-    p_lay_gen.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_output_flags(p_lay_gen)
     p_lay_gen.set_defaults(func=cmd_layout_gen)
 
     p_lay_info = layout_sub.add_parser("info", help="read a layout: cells, layers, shapes, extents")
     p_lay_info.add_argument("file", help="layout file to read")
     p_lay_info.add_argument("--layers", help="layer name map as JSON, e.g. '{\"m1\":[1,0]}'")
     p_lay_info.add_argument("--timeout", type=float, help="timeout in seconds")
-    p_lay_info.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_output_flags(p_lay_info)
     p_lay_info.set_defaults(func=cmd_layout_info)
 
     p_lay_drc = layout_sub.add_parser("drc", help="run width/space/notch/enclosing/area checks")
@@ -1292,7 +1302,7 @@ def build_parser():
     p_lay_drc.add_argument("--exit-zero", action="store_true",
                            help="exit 0 even when violations are found (for scripts that "
                                 "want to inspect them; default is 3)")
-    p_lay_drc.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_output_flags(p_lay_drc)
     p_lay_drc.set_defaults(func=cmd_layout_drc)
 
     p_lay_bool = layout_sub.add_parser("boolean", help="layer algebra between two layers")
@@ -1305,12 +1315,12 @@ def build_parser():
     p_lay_bool.add_argument("--source", help="input layout; omit to build from the spec")
     p_lay_bool.add_argument("--layers", help="layer name map as JSON")
     p_lay_bool.add_argument("--timeout", type=float, help="timeout in seconds")
-    p_lay_bool.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_output_flags(p_lay_bool)
     p_lay_bool.set_defaults(func=cmd_layout_boolean)
 
     p_lay_tools = layout_sub.add_parser(
         "tools", help="list KLayout's standalone stream tools on the target")
-    p_lay_tools.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_output_flags(p_lay_tools)
     p_lay_tools.set_defaults(func=cmd_layout_tools)
 
     p_lay_conv = layout_sub.add_parser(
@@ -1319,7 +1329,7 @@ def build_parser():
     p_lay_conv.add_argument("output", help="output layout file")
     p_lay_conv.add_argument("--tool", help="tool key (oasis/gds/cif/dxf/txt/mag/lstr/clip)")
     p_lay_conv.add_argument("--timeout", type=float, help="timeout in seconds")
-    p_lay_conv.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_output_flags(p_lay_conv)
     p_lay_conv.set_defaults(func=cmd_layout_convert)
 
     p_lay_cmp = layout_sub.add_parser(
@@ -1329,7 +1339,7 @@ def build_parser():
     p_lay_cmp.add_argument("--tool", default="compare", choices=["compare", "xor"],
                            help="compare with strmcmp (default) or XOR with strmxor")
     p_lay_cmp.add_argument("--timeout", type=float, help="timeout in seconds")
-    p_lay_cmp.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_output_flags(p_lay_cmp)
     p_lay_cmp.set_defaults(func=cmd_layout_compare)
 
     p_lay_deck = layout_sub.add_parser(
@@ -1340,7 +1350,7 @@ def build_parser():
     p_lay_deck.add_argument("--define", action="append", metavar="NAME=VALUE",
                             help="extra -rd variable; repeatable")
     p_lay_deck.add_argument("--timeout", type=float, help="timeout in seconds")
-    p_lay_deck.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_output_flags(p_lay_deck)
     p_lay_deck.set_defaults(func=cmd_layout_deck)
 
     p_dsh = sub.add_parser(
@@ -1354,7 +1364,7 @@ def build_parser():
         parser.add_argument("--dsh-home",
                             help="override $DSH_HOME (default ~/.dsh); read-only, "
                                  "used to report the wiring")
-        parser.add_argument("--json", action="store_true", help="print raw JSON")
+        _add_output_flags(parser)
 
     p_dsh_status = dsh_sub.add_parser(
         "status", help="is the workspace skill installed, and does a profile scan it")
@@ -1381,7 +1391,7 @@ def build_parser():
     p_sch_snap.add_argument("--view", default="schematic")
     p_sch_snap.add_argument("-o", "--out", help="write the snapshot JSON here")
     p_sch_snap.add_argument("--timeout", type=float, default=300.0)
-    p_sch_snap.add_argument("--json", action="store_true")
+    _add_output_flags(p_sch_snap)
     p_sch_snap.set_defaults(func=cmd_sch_snapshot)
 
     p_sch_build = sch_sub.add_parser("build", help="create a schematic from a snapshot/canvas")
@@ -1390,7 +1400,7 @@ def build_parser():
     p_sch_build.add_argument("--cell", help="target cell (overrides the spec)")
     p_sch_build.add_argument("--view", default="schematic")
     p_sch_build.add_argument("--timeout", type=float, default=600.0)
-    p_sch_build.add_argument("--json", action="store_true")
+    _add_output_flags(p_sch_build)
     p_sch_build.set_defaults(func=cmd_sch_build)
 
     p_sch_net = sch_sub.add_parser("netlist", help="emit SPICE text from a spec")
@@ -1400,18 +1410,18 @@ def build_parser():
     p_sch_net.add_argument("--library", help="target library (for an unbound drawing)")
     p_sch_net.add_argument("--cell", help="target cell (for an unbound drawing)")
     p_sch_net.add_argument("--view", default="schematic")
-    p_sch_net.add_argument("--json", action="store_true")
+    _add_output_flags(p_sch_net)
     p_sch_net.set_defaults(func=cmd_sch_netlist)
 
     p_sch_rt = sch_sub.add_parser("roundtrip",
                                   help="build, read back and compare the connectivity")
     p_sch_rt.add_argument("spec", help="snapshot or canvas document")
     p_sch_rt.add_argument("--timeout", type=float, default=900.0)
-    p_sch_rt.add_argument("--json", action="store_true")
+    _add_output_flags(p_sch_rt)
     p_sch_rt.set_defaults(func=cmd_sch_roundtrip)
 
     p_version = sub.add_parser("version", help="show the version")
-    p_version.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_output_flags(p_version)
     p_version.set_defaults(func=cmd_version)
 
     return parser
@@ -1446,6 +1456,8 @@ def _target_operation(args):
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
+    global _OUTPUT_DEBUG
+    _OUTPUT_DEBUG = bool(getattr(args, "debug", False))
     if not getattr(args, "command", None):
         parser.print_help()
         return 0
