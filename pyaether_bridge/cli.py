@@ -189,6 +189,7 @@ def cmd_sch_roundtrip(args):
 # output helpers
 # --------------------------------------------------------------------------- #
 _OUTPUT_DEBUG = False
+_OUTPUT_SUMMARY = False
 
 
 def _add_output_flags(parser):
@@ -199,7 +200,8 @@ def _add_output_flags(parser):
 
 
 def _print_json(payload):
-    print(_load("protocol").dumps(payload, debug=_OUTPUT_DEBUG))
+    print(_load("protocol").dumps(payload, debug=_OUTPUT_DEBUG,
+                                  summary=_OUTPUT_SUMMARY))
 
 
 def _emit(payload, as_json, human):
@@ -1269,6 +1271,10 @@ def build_parser():
     p_sim_run.add_argument("--include", action="append", metavar="FILE",
                            help="extra file (model/Verilog-A include) staged next to the netlist; repeatable")
     p_sim_run.add_argument("--run-id", help="suffix for the run directory name")
+    p_sim_run.add_argument("--summary", action="store_true",
+                           help="condense each waveform trace to n/first/last/min/max "
+                                "instead of every sample; the raw file stays in "
+                                "metadata.artifacts")
     _add_output_flags(p_sim_run)
     p_sim_run.set_defaults(func=cmd_sim_run)
 
@@ -1456,8 +1462,9 @@ def _target_operation(args):
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
-    global _OUTPUT_DEBUG
+    global _OUTPUT_DEBUG, _OUTPUT_SUMMARY
     _OUTPUT_DEBUG = bool(getattr(args, "debug", False))
+    _OUTPUT_SUMMARY = bool(getattr(args, "summary", False))
     if not getattr(args, "command", None):
         parser.print_help()
         return 0

@@ -166,6 +166,43 @@ then ok "brief() keeps results and drops diagnostics"
 else bad "brief() trimming is wrong"
 fi
 
+echo "[8] protocol.summarize() condenses traces without inventing numbers"
+if PYAETHER_REPO="$ROOT" "$PY" - <<'PYEOF'
+import json
+import os
+import sys
+
+sys.path.insert(0, os.environ["PYAETHER_REPO"])
+from pyaether_bridge import protocol
+
+reply = {"ok": True, "status": "SUCCESS", "operation": "run",
+         "data": {"time": [index * 1e-9 for index in range(10000)],
+                  "v(out)": [1.0, 2.0, 0.5] + [1.5] * 9997},
+         "errors": [], "warnings": [], "metadata": {"plots": [{"points": 10000}]}}
+
+full = protocol.dumps(reply)
+short = protocol.dumps(reply, summary=True)
+assert len(short) < len(full) // 100, (len(full), len(short))
+
+shaped = json.loads(short)
+assert shaped["data"]["v(out)"] == {"n": 10000, "first": 1.0, "last": 1.5,
+                                    "min": 0.5, "max": 2.0}, shaped["data"]["v(out)"]
+# the plot inventory survives, so the run itself is still described
+assert shaped["metadata"]["plots"] == [{"points": 10000}], shaped["metadata"]
+
+# a trace no longer than its own summary keeps its samples
+tiny = {"ok": True, "data": {"v(x)": [3.0]}, "metadata": {}}
+assert protocol.summarize(tiny)["data"]["v(x)"] == [3.0], protocol.summarize(tiny)
+
+# the simulator banner describes the run, not the result
+banner = dict(reply, metadata={"plots": [], "stdout_tail": "ngspice-47 banner"})
+assert "stdout_tail" not in protocol.brief(banner)["metadata"], protocol.brief(banner)
+assert protocol.brief(dict(banner, ok=False))["metadata"]["stdout_tail"] == "ngspice-47 banner"
+PYEOF
+then ok "summarize() condenses traces and keeps the inventory"
+else bad "summarize() is wrong"
+fi
+
 echo
 echo "== result: $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ] || exit 1

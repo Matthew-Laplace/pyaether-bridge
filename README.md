@@ -310,6 +310,12 @@ bridge ran rather than what it found. Those fields come back when the call did
 not succeed, and `--debug` prints them always, indented. The envelope and its
 keys are the same either way, so a parser sees no difference.
 
+`sim run` returns one array per signal, so a transient with ten thousand points
+is a four-hundred-kilobyte line. `--summary` replaces each trace with
+`{n, first, last, min, max}`. A trace no longer than its own summary keeps its
+samples, and `metadata.plots` plus `metadata.artifacts` still name the plots and
+the raw file, so nothing is lost -- only relocated.
+
 With `PYAETHER_BRIDGE_NO_AUTOSTART=1`, `status` reports the current state and
 starts nothing.
 

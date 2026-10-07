@@ -28,6 +28,8 @@ DIAGNOSTIC_METADATA = frozenset({
     "command",
     "engine",
     "returncode",
+    "stderr_tail",
+    "stdout_tail",
     "target",
     "target_reason",
     "timings",
@@ -80,9 +82,57 @@ def _brief_session(payload):
     return trimmed
 
 
-def dumps(payload, debug=False):
-    """Serialize a reply for stdout.  ``debug`` restores the verbose form."""
+def _trace_summary(values):
+    """One numeric trace -> ``{n, first, last, min, max}``."""
+    numbers = [item for item in values
+               if isinstance(item, (int, float)) and not isinstance(item, bool)]
+    if not numbers:
+        return {"n": len(values)}
+    return {"n": len(values), "first": numbers[0], "last": numbers[-1],
+            "min": min(numbers), "max": max(numbers)}
+
+
+def summarize(payload):
+    """Replace long traces in ``data`` with a bounded summary.
+
+    ``sim run`` puts one array per signal on stdout, so a transient with ten
+    thousand points costs about a hundred thousand tokens.  A trace becomes
+    ``{"n", "first", "last", "min", "max"}``.
+
+    A trace whose summary would not be smaller is left as it is, so a
+    one-point operating run does not grow.  The plot inventory and the raw
+    file paths stay in ``metadata``: the samples are relocated, not lost.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    data = payload.get("data")
+    if not isinstance(data, dict) or not data:
+        return payload
+    reduced = {}
+    changed = False
+    for key, value in data.items():
+        if isinstance(value, list) and value:
+            summary = _trace_summary(value)
+            if len(json.dumps(summary, default=str)) < len(json.dumps(value, default=str)):
+                reduced[key] = summary
+                changed = True
+                continue
+        reduced[key] = value
+    if not changed:
+        return payload
+    trimmed = dict(payload)
+    trimmed["data"] = reduced
+    return trimmed
+
+
+def dumps(payload, debug=False, summary=False):
+    """Serialize a reply for stdout.
+
+    ``debug`` restores the verbose form.  ``summary`` condenses waveform
+    traces, which only ``sim run`` produces.  The two are independent.
+    """
+    shaped = summarize(payload) if summary else payload
     if debug:
-        return json.dumps(payload, ensure_ascii=False, indent=2, default=str)
-    return json.dumps(brief(payload), ensure_ascii=False,
+        return json.dumps(shaped, ensure_ascii=False, indent=2, default=str)
+    return json.dumps(brief(shaped), ensure_ascii=False,
                       separators=(",", ":"), default=str)

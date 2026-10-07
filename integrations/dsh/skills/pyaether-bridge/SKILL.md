@@ -30,6 +30,11 @@ Read `ok` / `status` from the JSON — a non-empty body is not proof of success:
   `target_reason`, `work_dir`, `command`, `timings`, ...) are dropped on success
   and kept on failure; `session.import_log` is dropped once the session reports
   ready. `--debug` restores the indented form with every field.
+* `sim run` puts every sample of every signal in `data`. A transient of ten
+  thousand points is about four hundred kilobytes on one line. Pass `--summary`
+  to get `{n, first, last, min, max}` per trace instead. `metadata.plots` and
+  `metadata.artifacts` still name the plots and the raw file, so the samples
+  stay one file read away rather than gone.
 
 ## Command map (what the MCP tool names do)
 
