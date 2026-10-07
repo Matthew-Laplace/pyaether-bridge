@@ -144,6 +144,65 @@ echo 'import pyAether; print(pyAether.__file__)' | ./bin/pyaether exec
 ./bin/pyaether version
 ```
 
+## Recommended stack
+
+Four pieces carry a whole flow. Only one of them costs a licence.
+
+| Piece | Role |
+| --- | --- |
+| **DeepSeek Harness** | drives the loop; reaches the bridge over the CLI, so no session pays an MCP tool schema up front |
+| **`bin/pyaether`** | the only interface: API lookup, layout, schematic and simulation behind one vocabulary |
+| **ngspice** | open-source testbench simulation (`sim run --backend ngspice`) |
+| **KLayout** | layout geometry (`layout gen / info / drc / boolean / convert / compare`) |
+
+`api *`, `layout *`, `sim *` and `version` resolve their own target and need
+neither the daemon nor an Aether seat. `exec` and `sch snapshot|build|roundtrip`
+do: they run inside the resident session, which holds one `PY_AETHER` seat from
+the moment the first `exec` starts it. `sch netlist` does not — it is a pure
+function from a canvas document to SPICE text (measured: about 0.05 s for a
+two-resistor divider). Start the session when a task needs Aether's database;
+leave it down when the task is geometry or SPICE.
+
+### Spending tokens
+
+Measured on this repository's own commands:
+
+| Command | Default | With the flag |
+| --- | --- | --- |
+| `layout info --json` | 1885 B | 884 B |
+| `status --json` | 2840 B | ≈1700 B (varies with session state) |
+| `sim run --json`, 10 008-point transient | 389 231 B | 952 B (`--summary`) |
+
+1. **Ask for the answer, not the samples.** `--summary` reduces each waveform to
+   `{n, first, last, min, max}`, which answers "did it converge, and to what" at
+   1/400 the size. `metadata.plots` and `metadata.artifacts` still name the plots
+   and the raw file, so the samples are one file read away.
+2. **Let brief be the default and reach for `--debug` on failure.** Execution
+   diagnostics — the scratch directory, the command line, the simulator banner —
+   are dropped when a call succeeded and kept when it did not, which is when
+   they are worth reading.
+3. **Search the catalog before guessing a symbol.** `api search` and `api show`
+   read the offline catalog in about 0.12 s and need no session. An invented
+   `pyAether.*` name costs a round trip and can return `nil` that reads like a
+   no-op.
+
+### Spending round trips
+
+1. **Prefer the compound verb.** `layout gen spec.json -o out.gds` builds an
+   entire layout in one call; creating shapes one at a time is one call each.
+2. **Read back in one call.** `layout compare a.gds b.gds` exits 0 when the
+   layouts are identical, and `sch roundtrip spec.json` builds, reads back and
+   diffs the connectivity. Both settle a write with a single question. (Both
+   `sch roundtrip` and any `layout` command that writes need your authorization
+   first — the bridge does not ask for you.)
+3. **Read `ok` and `status`, not the prose.** `SUCCESS` / `PARTIAL` / `FAILURE`
+   is the contract; a non-empty body is not proof of success.
+4. **Background the long ones.** A large `layout gen`, `layout deck` or `sim run`
+   belongs in background mode, so a timeout does not cost the run.
+5. **Batch target-side work.** Every request passes one daemon lock, so a long
+   `exec` blocks the rest. Send one bounded transaction per authorized view —
+   never one call per instance, wire or label.
+
 ## Layout (KLayout)
 
 Layouts are generated, read, checked and converted with **KLayout**, driven the
